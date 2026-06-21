@@ -1,0 +1,10 @@
+.venv/
+.venv*/
+__pycache__/
+*.pyc
+references/
+controller_memory.bin
+*.log
+*.bak
+*.bak.*
+config.json

@@ -1,0 +1,4 @@
+# bleak is used only for BLE scanning during pairing. 0.22.x is the known-good
+# pin (newer 3.x changed service-discovery behaviour on some BlueZ versions).
+bleak==0.22.2
+evdev>=1.6

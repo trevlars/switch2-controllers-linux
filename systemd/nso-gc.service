@@ -1,0 +1,16 @@
+[Unit]
+Description=Switch 2 controller wireless bridge (GameCube / Pro / Joy-Con BLE -> uinput)
+Documentation=https://github.com/local/nso-gc-bazzite
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/nso-gc-bazzite
+ExecStart=%h/nso-gc-bazzite/.venv312/bin/python -m ngc run
+Restart=always
+RestartSec=3
+# uinput is accessible to the user via udev ACL; no root required.
+
+[Install]
+WantedBy=default.target
