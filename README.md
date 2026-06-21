@@ -1,10 +1,10 @@
 # Switch 2 Controllers on Linux
 
-Wireless **Nintendo Switch 2** controller support for Linux — including the
-**NSO GameCube controller**, **Pro Controller 2**, and **Joy-Con 2** — with
-working buttons, analog sticks/triggers, **rumble**, **gyro/accelerometer**
-(via a built-in DSU/cemuhook server), battery reporting, and reliable
-wake-from-sleep reconnection.
+Wireless **Nintendo Switch 2** controller support for Linux. The **NSO GameCube
+controller** and **Pro Controller 2** are tested and working — buttons, analog
+sticks/triggers, **rumble**, **gyro/accelerometer** (via a built-in DSU/cemuhook
+server), battery reporting, and reliable wake-from-sleep reconnection.
+**Joy-Con 2** has experimental, **untested** scaffolding (see the table below).
 
 The Switch 2 controllers use a proprietary Bluetooth LE (GATT) protocol that
 standard Linux gamepad stacks don't understand. This project talks to them
@@ -22,8 +22,9 @@ fully in user space — no kernel modules, no root.
   with its own virtual gamepad, rumble, and DSU motion slot.
 - **Reliable wake-connect**: serialized LE connection coordinator so several
   asleep controllers reconnect reliably with a button press.
-- **Rumble**: HD rumble for Pro Controller 2 / Joy-Con 2 (real motor packets);
-  preset-based, edge-driven rumble for the NSO GameCube pad (no HD actuator).
+- **Rumble**: HD rumble for Pro Controller 2 (real motor packets; Joy-Con 2
+  paths exist but are untested); preset-based, edge-driven rumble for the NSO
+  GameCube pad (no HD actuator).
 - **Gyro everywhere**: an embedded **DSU (cemuhook) UDP server** on
   `127.0.0.1:26760` feeds accel/gyro to Dolphin, Cemu, Ryujinx, etc.
 - **Analog triggers + C-stick** on the NSO GameCube pad; calibrated sticks.
@@ -32,11 +33,18 @@ fully in user space — no kernel modules, no root.
 
 ## Supported controllers
 
-| Controller            | Buttons | Sticks | Triggers      | Rumble        | Gyro |
-| --------------------- | ------- | ------ | ------------- | ------------- | ---- |
-| NSO GameCube          | ✅      | ✅     | ✅ analog L/R | ✅ presets    | ✅   |
-| Pro Controller 2      | ✅      | ✅     | digital ZL/ZR | ✅ HD rumble  | ✅   |
-| Joy-Con 2 (L / R)     | ✅      | ✅     | digital       | ✅ HD rumble  | ✅   |
+| Controller            | Status        | Buttons | Sticks | Triggers      | Rumble       | Gyro |
+| --------------------- | ------------- | ------- | ------ | ------------- | ------------ | ---- |
+| NSO GameCube          | ✅ tested      | ✅      | ✅     | ✅ analog L/R | ✅ presets   | ✅   |
+| Pro Controller 2      | ✅ tested      | ✅      | ✅     | digital ZL/ZR | ✅ HD rumble | ✅   |
+| Joy-Con 2 (L / R)     | ⚠️ untested   | ?       | ?      | ?             | ?            | ?    |
+
+> **Joy-Con 2 is untested.** The code defines their product IDs, accepts them in
+> the scanner, and has per-side vibration UUIDs, so they may connect — but this
+> has never been verified against real hardware. A single Joy-Con also needs its
+> own button/stick mapping and sideways orientation handling, which isn't
+> implemented yet (it currently reuses the full-controller layout). Treat
+> Joy-Con 2 as a starting point, not a working feature. Reports/PRs welcome.
 
 ## How it works
 
