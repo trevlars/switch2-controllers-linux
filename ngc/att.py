@@ -115,12 +115,27 @@ class ATTClient:
         self._resp_pdu: Optional[bytes] = None
         self.notification_cb: Optional[Callable[[int, bytes], None]] = None
         self.disconnect_cb: Optional[Callable[[], None]] = None
+        self._closing = False
+        self.last_packet_at: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Connection                                                          #
     # ------------------------------------------------------------------ #
 
-    def connect(self, timeout: float = 10.0) -> bool:
+    def connect(self, timeout: float = 10.0) -> tuple[bool, str]:
+        """Try LE public and random target address types (bonded pads vary)."""
+        per = max(0.1, timeout / 2)
+        errors: list[str] = []
+        for dst_type in (LE_PUBLIC, LE_RANDOM):
+            ok, detail = self._connect_once(dst_type, per)
+            if ok:
+                self.dst_type = dst_type
+                return True, "ok"
+            label = "public" if dst_type == LE_PUBLIC else "random"
+            errors.append(f"{label}: {detail}")
+        return False, "; ".join(errors)
+
+    def _connect_once(self, dst_type: int, timeout: float) -> tuple[bool, str]:
         s = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
         s.setsockopt(SOL_BLUETOOTH, BT_SECURITY, struct.pack("BB", BT_SECURITY_LOW, 0))
         fd = s.fileno()
@@ -128,35 +143,39 @@ class ATTClient:
         bind_addr = _sockaddr_l2(0, baddr(self.adapter), ATT_CID, LE_PUBLIC)
         if _libc.bind(fd, bind_addr, len(bind_addr)) != 0:
             s.close()
-            raise OSError(ctypes.get_errno(), "L2CAP bind failed")
+            return False, f"L2CAP bind failed (errno {ctypes.get_errno()})"
 
         s.setblocking(False)
-        conn_addr = _sockaddr_l2(0, baddr(self.dst), ATT_CID, self.dst_type)
+        conn_addr = _sockaddr_l2(0, baddr(self.dst), ATT_CID, dst_type)
         r = _libc.connect(fd, conn_addr, len(conn_addr))
         errno = ctypes.get_errno()
         if r != 0 and errno not in (115, 114):  # EINPROGRESS / EALREADY
             s.close()
-            return False
+            return False, f"connect errno {errno}"
 
         _, w, _ = select.select([], [fd], [], timeout)
         if not w:
             s.close()
-            return False
+            return False, "timeout (adapter may still be scanning)"
+
         soerr = s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if soerr != 0:
             s.close()
-            return False
+            return False, f"SO_ERROR {soerr}"
 
         s.setblocking(True)
+        self._closing = False
         self.sock = s
+        self.last_packet_at = time.monotonic()
         self._start_reader()
         try:
             self.exchange_mtu(247)
         except Exception:
             pass
-        return True
+        return True, "ok"
 
     def close(self) -> None:
+        self._closing = True
         self._running = False
         if self.sock:
             try:
@@ -191,6 +210,7 @@ class ATTClient:
                 break
             if not pdu:
                 break
+            self.last_packet_at = time.monotonic()
             opcode = pdu[0]
             if opcode == ATT_HANDLE_VALUE_NTF:
                 handle = struct.unpack_from("<H", pdu, 1)[0]
@@ -203,7 +223,7 @@ class ATTClient:
                 self._resp_pdu = pdu
                 self._resp_event.set()
         self._running = False
-        if self.disconnect_cb is not None:
+        if not self._closing and self.disconnect_cb is not None:
             try:
                 self.disconnect_cb()
             except Exception:

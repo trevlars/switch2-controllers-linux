@@ -70,6 +70,7 @@ class SwitchController:
 
         self.input_callback: Optional[InputCallback] = None
         self.disconnect_callback: Optional[Callable[[], None]] = None
+        self.last_input_at: float = 0.0
 
         self.att.notification_cb = self._on_notification
         self.att.disconnect_cb = self._on_disconnect
@@ -99,7 +100,8 @@ class SwitchController:
     # ------------------------------------------------------------------ #
 
     def connect(self, timeout: float = 10.0) -> bool:
-        return self.att.connect(timeout=timeout)
+        ok, _ = self.att.connect(timeout=timeout)
+        return ok
 
     def close(self) -> None:
         self._hd_run = False
@@ -161,26 +163,35 @@ class SwitchController:
     def initialize(self, player: int = 1) -> None:
         """Run the full handshake after a successful connect."""
         self._resolve_handles()
-        self.enable_commands()
+        self._retry("enable commands", self.enable_commands)
 
-        self.info = self.read_controller_info()
+        self.info = self._retry("read info", self.read_controller_info)
         logger.info("identified %s serial=%s", self.info.name, self.info.serial_number)
         self._resolve_vibration_handle()
 
         self._read_calibration()
 
-        self.set_player_leds(player)
-        # The preset (command) vibration path is safe and confirms the link.
-        self.play_vibration_preset(0x03)
-        # Enable button + stick + IMU reporting.
-        self.enable_features(0x03 | P.FEATURE_MOTION)
+        self._retry("player LEDs", lambda: self.set_player_leds(player))
+        self._retry("vibration test", lambda: self.play_vibration_preset(0x03))
+        self._retry("enable features", lambda: self.enable_features(0x03 | P.FEATURE_MOTION))
 
         if self.has_hd_rumble:
             self._start_hd_worker()
 
-        # Finally turn on input report notifications.
-        self.att.subscribe(self.h_input_cccd, True)
+        self._retry("input notifications", lambda: self.att.subscribe(self.h_input_cccd, True))
+        self.last_input_at = time.monotonic()
         logger.info("input notifications enabled")
+
+    def _retry(self, label: str, fn, attempts: int = 3, delay: float = 0.1):
+        last_exc: Optional[Exception] = None
+        for attempt in range(attempts):
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt + 1 < attempts:
+                    time.sleep(delay)
+        raise RuntimeError(f"{label} failed after {attempts} tries: {last_exc}") from last_exc
 
     # ------------------------------------------------------------------ #
     # Notification handling                                               #
@@ -190,6 +201,7 @@ class SwitchController:
         if handle == self.h_input:
             report = P.InputReport.parse(data)
             self.battery_mv = report.battery_mv
+            self.last_input_at = time.monotonic()
             if self.input_callback is not None:
                 self.input_callback(self, report)
         elif handle == self.h_cmd_resp:

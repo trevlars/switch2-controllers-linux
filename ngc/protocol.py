@@ -13,6 +13,7 @@ can be unit-tested anywhere.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 # --------------------------------------------------------------------------- #
 # Controller identification                                                    #
@@ -104,6 +105,23 @@ PAIR_LTK2 = bytes([0x00, 0x40, 0xB0, 0x8A, 0x5F, 0xCD, 0x1F, 0x9B, 0x41, 0x12, 0
 def mac_to_le_bytes(mac: str) -> bytes:
     """Return a 6-byte little-endian representation of a MAC string."""
     return bytes.fromhex(mac.replace(":", ""))[::-1]
+
+
+def mac_to_int(mac: str) -> int:
+    """Return the host MAC as a big-endian integer (Switch 2 reconnect field)."""
+    return int.from_bytes(bytes(int(b, 16) for b in mac.split(":")), "big")
+
+
+def reconnect_mac_from_advertisement(adv) -> Optional[int]:
+    """Parse the bonded-host MAC embedded in a Switch 2 advertisement.
+
+    Returns 0 when the controller is in pairing mode, otherwise the host MAC it
+    will wake for (big-endian integer, same encoding as ``mac_to_int``).
+    """
+    manu = getattr(adv, "manufacturer_data", {}).get(NINTENDO_COMPANY_ID)
+    if not manu or len(manu) < 16:
+        return None
+    return decodeu(manu[10:16])
 
 COMMAND_FEATURE = 0x0C
 SUBCOMMAND_FEATURE_INIT = 0x02

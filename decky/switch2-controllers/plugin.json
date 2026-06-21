@@ -1,0 +1,11 @@
+{
+  "name": "Switch 2 Controllers",
+  "author": "trevlars",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["bluetooth", "controller", "switch", "gamecube", "bazzite"],
+    "description": "Pair and manage NSO GameCube / Switch 2 Pro controllers in Game Mode.",
+    "image": "https://opengraph.githubassets.com/1/trevlars/switch2-controllers-linux"
+  }
+}

@@ -8,3 +8,5 @@ controller_memory.bin
 *.bak
 *.bak.*
 config.json
+decky/**/node_modules/
+decky/**/*.zip

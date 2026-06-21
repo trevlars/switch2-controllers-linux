@@ -10,6 +10,7 @@ WorkingDirectory=%h/nso-gc-bazzite
 ExecStart=%h/nso-gc-bazzite/.venv312/bin/python -m ngc run
 Restart=always
 RestartSec=3
+StartLimitIntervalSec=0
 # uinput is accessible to the user via udev ACL; no root required.
 
 [Install]

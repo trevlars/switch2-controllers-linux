@@ -42,8 +42,8 @@ def _parse_manufacturer(adv) -> Optional[tuple[int, int, bool]]:
         return None
     vid = struct.unpack_from("<H", manu, 3)[0]
     pid = struct.unpack_from("<H", manu, 5)[0]
-    # manu[12] == 0 indicates the controller is in pairing/advertising mode.
-    is_pairing = manu[12] == 0
+    reconnect = P.reconnect_mac_from_advertisement(adv)
+    is_pairing = reconnect == 0
     return vid, pid, is_pairing
 
 
@@ -109,3 +109,58 @@ async def find_first(
     finally:
         await scanner.stop()
     return result.get("found")
+
+
+async def wait_for_addresses(
+    addresses: set[str],
+    timeout: float = 12.0,
+    stop: Optional[asyncio.Event] = None,
+    host_mac: Optional[int] = None,
+    bonded_wake_only: bool = False,
+) -> Optional[str]:
+    """Return the first address from ``addresses`` seen advertising.
+
+    When ``bonded_wake_only`` is set, only adverts whose embedded reconnect MAC
+    matches ``host_mac`` count (button-press wake). Pairing-mode adverts
+    (reconnect MAC == 0) are ignored.
+    """
+    if not addresses:
+        return None
+    want = {a.upper() for a in addresses}
+    found: dict[str, str] = {}
+    done = asyncio.Event()
+
+    def _cb(device: BLEDevice, adv) -> None:
+        addr = device.address.upper()
+        if addr not in want or addr in found:
+            return
+        reconnect = P.reconnect_mac_from_advertisement(adv)
+        if bonded_wake_only and host_mac is not None:
+            if reconnect == 0:
+                return  # pairing mode (Sync held) — not a button wake
+            if reconnect is not None and reconnect != host_mac:
+                return  # bonded to a different host
+            # reconnect == host_mac, or no manufacturer block: accept
+        elif reconnect is not None and host_mac is not None and reconnect not in (0, host_mac):
+            return
+        found["addr"] = addr
+        done.set()
+
+    scanner = BleakScanner(detection_callback=_cb)
+    await scanner.start()
+    try:
+        waiters = [asyncio.create_task(done.wait())]
+        if stop is not None:
+            waiters.append(asyncio.create_task(stop.wait()))
+        done_task, pending = await asyncio.wait(
+            waiters,
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        if done.is_set():
+            return found.get("addr")
+        return None
+    finally:
+        await scanner.stop()

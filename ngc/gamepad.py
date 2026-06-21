@@ -156,8 +156,25 @@ class SwitchGamepad:
         if changed:
             self.ui.syn()
 
-    # ------------------------------------------------------------------ #
-    # Force feedback (rumble)                                             #
+    def release_all(self) -> None:
+        """Neutralize all inputs but keep the uinput node alive for Steam/SDL."""
+        changed = False
+        for code in list(self._last_keys):
+            changed |= self._emit_key(code, 0)
+        for code, neutral in (
+            (e.ABS_X, 0),
+            (e.ABS_Y, 0),
+            (e.ABS_RX, 0),
+            (e.ABS_RY, 0),
+            (e.ABS_Z, 0),
+            (e.ABS_RZ, 0),
+            (e.ABS_HAT0X, 0),
+            (e.ABS_HAT0Y, 0),
+        ):
+            changed |= self._emit_abs(code, neutral)
+        if changed:
+            self.ui.syn()
+
     # ------------------------------------------------------------------ #
 
     def _ff_loop(self) -> None:

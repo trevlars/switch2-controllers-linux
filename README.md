@@ -20,8 +20,10 @@ fully in user space — no kernel modules, no root.
 
 - **Multiple controllers at once** (local multiplayer): one worker per pad, each
   with its own virtual gamepad, rumble, and DSU motion slot.
-- **Reliable wake-connect**: serialized LE connection coordinator so several
-  asleep controllers reconnect reliably with a button press.
+- **Wake-connect after pairing**: a shared BLE scan watches for your bonded
+  controllers; press any button to wake and the bridge connects. This replaces
+  the earlier blind retry loop, but **still needs real-world confirmation** on
+  your box — especially with two pads waking at once.
 - **Rumble**: HD rumble for Pro Controller 2 (real motor packets; Joy-Con 2
   paths exist but are untested); preset-based, edge-driven rumble for the NSO
   GameCube pad (no HD actuator).
@@ -29,6 +31,8 @@ fully in user space — no kernel modules, no root.
   `127.0.0.1:26760` feeds accel/gyro to Dolphin, Cemu, Ryujinx, etc.
 - **Analog triggers + C-stick** on the NSO GameCube pad; calibrated sticks.
 - **Auto-reconnect** with bonding (no re-pairing after the first time).
+- **Desktop launchers** on Bazzite for first-time setup and pairing (no terminal
+  or Decky plugin required).
 - **systemd --user service** for hands-off background operation.
 
 ## Supported controllers
@@ -85,39 +89,49 @@ Key design choices:
 ## Install
 
 ```bash
-git clone https://github.com/trevlars/switch2-controllers-linux.git
-cd switch2-controllers-linux
-
-# Option A: simple venv
-python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-
-# Option B: Bazzite / immutable-friendly bootstrap (uv + Python 3.12 + service)
+git clone https://github.com/trevlars/switch2-controllers-linux.git ~/nso-gc-bazzite
+cd ~/nso-gc-bazzite
 bash scripts/install.sh
 ```
 
+**On Bazzite Desktop (easiest):** open the app menu and run **Switch 2
+Controllers — First-Time Setup**, then **Pair Switch 2 Controller**. No terminal
+and no Decky plugin needed.
+
 ## Usage
 
+### First time only — pair each controller
+
+1. Hold **Sync** until the player LEDs sweep/chase (pairing mode).
+2. Run **Pair Switch 2 Controller** from the Desktop app menu (or
+   `.venv312/bin/python -m ngc pair` from a terminal).
+3. Repeat for a second pad if you use both GameCube + Pro.
+
+The wizard bonds the controller so it can reconnect without pairing mode again.
+
+### Every day — wake and play
+
+1. Make sure the background service is running (setup enables it):
+   `systemctl --user status nso-gc.service`
+2. **Press any button** on a paired controller to wake it.
+3. The bridge scans for that pad's advertisement and connects automatically.
+
+Use **Switch 2 Controller Status** from the app menu to see what's paired and
+whether the service is active.
+
+> **Honest status:** pairing, input, rumble, and gyro are tested on real
+> hardware (NSO GameCube + Pro Controller 2). Routine wake-connect *should* work
+> after bonding, but it has been flaky in development (adapter scanning
+> conflicts, Decky BT Wake plugin). The bridge now uses advertisement-driven
+> wake-connect instead of blind retries — please verify on your box and report
+> issues. Simultaneous dual-pad wake is still best-effort.
+
 ```bash
-# 1) Put the controller in pairing mode, then pair (bonds for auto-reconnect):
-python -m ngc pair
-
-# 2) List configured controllers:
-python -m ngc list
-
-# 3) Run the bridge (foreground):
-python -m ngc run
+# Terminal equivalents
+python -m ngc list          # show paired controllers
+python -m ngc run           # foreground bridge (service uses this)
+journalctl --user -u nso-gc.service -f   # live logs
 ```
-
-As a background service:
-
-```bash
-systemctl --user enable --now nso-gc.service
-journalctl --user -u nso-gc.service -f
-```
-
-Configuration lives at `~/.config/nso-gc/config.json` (controllers, player
-order, adapter MAC, rumble toggle). Pairing writes it for you.
 
 ## Gyro / motion (DSU)
 

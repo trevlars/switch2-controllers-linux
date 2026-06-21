@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "nso-gc"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+CONFIG_BACKUP = CONFIG_DIR / "config.json.bak"
 
 
 def detect_adapter() -> Optional[str]:
@@ -37,6 +39,7 @@ class ControllerEntry:
     mac: str
     player: int = 1
     name: str = ""
+    bonded: bool = False
 
 
 @dataclass
@@ -51,13 +54,26 @@ class Config:
     player: int = 1
 
     @classmethod
+    def _read_json(cls, path: Path) -> dict:
+        return json.loads(path.read_text())
+
+    @classmethod
     def load(cls) -> "Config":
         if CONFIG_PATH.exists():
             try:
-                data = json.loads(CONFIG_PATH.read_text())
-                cfg = cls(**{k: data[k] for k in data if k in cls.__dataclass_fields__})
+                data = cls._read_json(CONFIG_PATH)
             except Exception:
-                cfg = cls()
+                if CONFIG_BACKUP.exists():
+                    try:
+                        data = cls._read_json(CONFIG_BACKUP)
+                    except Exception:
+                        cfg = cls()
+                    else:
+                        cfg = cls(**{k: data[k] for k in data if k in cls.__dataclass_fields__})
+                else:
+                    cfg = cls()
+            else:
+                cfg = cls(**{k: data[k] for k in data if k in cls.__dataclass_fields__})
         else:
             cfg = cls()
         cfg._migrate()
@@ -79,22 +95,76 @@ class Config:
                 mac=c["mac"],
                 player=c.get("player", i + 1),
                 name=c.get("name", ""),
+                bonded=bool(c.get("bonded", False)),
             )
             for i, c in enumerate(self.controllers)
         ]
 
-    def add_controller(self, mac: str, name: str = "") -> ControllerEntry:
-        """Add (or update) a controller, assigning the next free player slot."""
+    def mark_bonded(self, mac: str, bonded: bool = True) -> None:
         for c in self.controllers:
             if c["mac"].upper() == mac.upper():
+                c["bonded"] = bonded
+                return
+
+    def is_bonded(self, mac: str) -> bool:
+        for c in self.controllers:
+            if c["mac"].upper() == mac.upper():
+                return bool(c.get("bonded", False))
+        return False
+
+    def add_controller(self, mac: str, name: str = "", player: int | None = None) -> ControllerEntry:
+        """Add (or update) a controller, assigning the next free player slot."""
+        mac = mac.upper()
+        for c in self.controllers:
+            if c["mac"].upper() == mac:
                 if name:
                     c["name"] = name
-                return ControllerEntry(c["mac"], c.get("player", 1), c.get("name", ""))
-        used = {c.get("player", 0) for c in self.controllers}
-        player = next(p for p in range(1, 9) if p not in used)
-        entry = {"mac": mac, "player": player, "name": name}
+                if player is not None:
+                    used = {x.get("player") for x in self.controllers if x["mac"].upper() != mac}
+                    if player in used:
+                        raise ValueError(f"player {player} already in use")
+                    c["player"] = player
+                return ControllerEntry(
+                    c["mac"], c.get("player", 1), c.get("name", ""), bool(c.get("bonded", False))
+                )
+        if player is not None:
+            if any(c.get("player") == player for c in self.controllers):
+                raise ValueError(f"player {player} already in use")
+            assigned = player
+        else:
+            used = {c.get("player", 0) for c in self.controllers}
+            assigned = next((p for p in range(1, 9) if p not in used), None)
+            if assigned is None:
+                raise ValueError("maximum 8 controllers already saved")
+        entry = {"mac": mac, "player": assigned, "name": name, "bonded": False}
         self.controllers.append(entry)
-        return ControllerEntry(mac, player, name)
+        return ControllerEntry(mac, assigned, name, False)
+
+    def remove_controller(self, mac: str) -> bool:
+        mac = mac.upper()
+        before = len(self.controllers)
+        self.controllers = [c for c in self.controllers if c["mac"].upper() != mac]
+        return len(self.controllers) < before
+
+    def swap_players(self, player_a: int, player_b: int) -> bool:
+        ca = cb = None
+        for c in self.controllers:
+            if c.get("player") == player_a:
+                ca = c
+            elif c.get("player") == player_b:
+                cb = c
+        if not ca or not cb:
+            return False
+        ca["player"], cb["player"] = player_b, player_a
+        return True
+
+    def find_by_player(self, player: int) -> Optional[ControllerEntry]:
+        for c in self.controllers:
+            if c.get("player") == player:
+                return ControllerEntry(
+                    c["mac"], c.get("player", 1), c.get("name", ""), bool(c.get("bonded", False))
+                )
+        return None
 
     def save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -105,4 +175,12 @@ class Config:
         self.save_path(data)
 
     def save_path(self, data: dict) -> None:
-        CONFIG_PATH.write_text(json.dumps(data, indent=2))
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(data, indent=2)
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        tmp.write_text(payload)
+        os.replace(tmp, CONFIG_PATH)
+        try:
+            shutil.copy2(CONFIG_PATH, CONFIG_BACKUP)
+        except OSError:
+            pass

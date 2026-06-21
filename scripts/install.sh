@@ -27,14 +27,25 @@ mkdir -p "$HOME/.config/systemd/user"
 cp systemd/nso-gc.service "$HOME/.config/systemd/user/nso-gc.service"
 systemctl --user daemon-reload
 
+echo ">> installing Desktop launcher..."
+mkdir -p "$HOME/.local/share/applications"
+chmod +x scripts/ngc-app.sh scripts/ngc-gui-common.sh scripts/ngc_gui.py
+sed "s|\$HOME|$HOME|g" system/desktop/switch2-controllers.desktop \
+  > "$HOME/.local/share/applications/switch2-controllers.desktop"
+rm -f "$HOME/.local/share/applications/switch2-controllers-"{setup,pair,status}.desktop 2>/dev/null || true
+
+if [[ -x "$PROJECT_DIR/scripts/install-decky.sh" ]]; then
+  bash "$PROJECT_DIR/scripts/install-decky.sh" || true
+fi
+
 cat <<EOF
 
-Installed. Next steps:
-  1. Pair the controller (put it in pairing mode first):
-       .venv312/bin/python -m ngc pair
-  2. Enable + start the background service:
-       systemctl --user enable --now nso-gc.service
-  3. Check status / logs:
-       systemctl --user status nso-gc.service
-       journalctl --user -u nso-gc.service -f
+Installed. Open **Switch 2 Controllers** from the app menu or Decky in Game Mode.
+
+  - Add each pad once (hold Sync) — hold Sync again to connect
+  - The bridge runs automatically in the background
+
+Service:
+  systemctl --user enable --now nso-gc.service
+  journalctl --user -u nso-gc.service -f
 EOF

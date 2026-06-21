@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Switch 2 Controllers
+Comment=NSO GameCube and Switch 2 Pro — auto-connect in the background
+Exec=$HOME/nso-gc-bazzite/scripts/ngc-app.sh
+Icon=preferences-system-bluetooth
+Terminal=false
+StartupNotify=true
+Categories=Game;Settings;
+Keywords=switch;nintendo;gamecube;controller;bluetooth;bazzite;
