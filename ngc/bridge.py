@@ -644,6 +644,24 @@ class _Worker:
         if self.hub.bridge is not None:
             self.hub.bridge._publish_state()
 
+    def _idle_sleep_s(self) -> float:
+        return max(0.0, float(getattr(self.config, "idle_sleep_s", 300.0)))
+
+    def _sleep_for_idle(self) -> None:
+        ctrl = self.controller
+        if ctrl is None:
+            self._disconnected.set()
+            return
+        try:
+            ctrl.sleep()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("idle sleep failed for %s (%s)", self.entry.mac, exc)
+            try:
+                ctrl.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._disconnected.set()
+
     def run(self) -> None:
         self.hub.register(self)
         while not self._stop.is_set():
@@ -652,7 +670,18 @@ class _Worker:
                 pass
             if self._stop.is_set() or not self.is_connected():
                 continue
+            idle_sleep_s = self._idle_sleep_s()
             while not self._stop.is_set() and not self._disconnected.is_set():
+                if idle_sleep_s > 0 and self.controller is not None:
+                    idle_for = time.monotonic() - self.controller.last_button_at
+                    if idle_for >= idle_sleep_s:
+                        logger.info(
+                            "controller %s idle %.0fs with no button presses; sleeping",
+                            self.entry.mac,
+                            idle_for,
+                        )
+                        self._sleep_for_idle()
+                        break
                 self._disconnected.wait(0.5)
             self._teardown_session(full=False)
 

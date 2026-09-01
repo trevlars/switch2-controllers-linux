@@ -77,6 +77,9 @@ class Config:
     enable_rumble: bool = True
     # Magnitude (0..1) at which a GameCube pad switches from soft to strong rumble.
     gc_impact_threshold: float = 0.52
+    # Disconnect and sleep the pad after this many seconds with no button presses.
+    # Set to 0 to disable. Override with NGC_IDLE_SLEEP_S / NGC_IDLE_SLEEP=0.
+    idle_sleep_s: float = 300.0
     # Legacy single-controller fields (migrated into `controllers` on load).
     controller_mac: Optional[str] = None
     player: int = 1
@@ -107,6 +110,7 @@ class Config:
         cfg._migrate()
         if not cfg.adapter_mac:
             cfg.adapter_mac = detect_adapter()
+        _apply_env_overrides(cfg)
         return cfg
 
     def _migrate(self) -> None:
@@ -212,3 +216,11 @@ class Config:
             shutil.copy2(CONFIG_PATH, CONFIG_BACKUP)
         except OSError:
             pass
+
+
+def _apply_env_overrides(cfg: Config) -> None:
+    raw = os.environ.get("NGC_IDLE_SLEEP_S", "").strip()
+    if raw:
+        cfg.idle_sleep_s = max(0.0, float(raw))
+    if os.environ.get("NGC_IDLE_SLEEP", "").strip().lower() in {"0", "false", "no", "off"}:
+        cfg.idle_sleep_s = 0.0
