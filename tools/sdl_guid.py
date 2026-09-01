@@ -166,11 +166,59 @@ def fix_gamecube_mapping(mapping: str) -> str:
     return ",".join([guid, name, *buttons, *axis_tokens])
 
 
+# ngc uinput Pro / Joy-Con 2: axes in Linux evdev order (ABS_X..ABS_RZ).
+NGC_PRO_AXES = (
+    "leftx:a0",
+    "lefty:a1",
+    "rightx:a2",
+    "righty:a3",
+    "lefttrigger:a4",
+    "righttrigger:a5",
+    "platform:Linux",
+)
+
+
+def fix_pro_mapping(mapping: str) -> str:
+    """Build gamecontrollerdb line for ngc Pro / Joy-Con 2 uinput pads.
+
+    Face buttons use semantic Nintendo positions (A=SOUTH, B=EAST, …) per
+    ngc/gamepad.py PRO_BUTTON_MAP sorted evdev key order."""
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    hat_tokens = [
+        token for token in parts[2:]
+        if token.split(":", 1)[0] in _KEEP_HAT_KEYS
+    ]
+    # b0=A b1=B b2=Y b3=X b4=Capture b5=L b6=R b7=ZL b8=ZR b9=Minus b10=Plus b11=Home
+    buttons = [
+        "a:b0",
+        "b:b1",
+        "x:b3",
+        "y:b2",
+        "back:b9",
+        "start:b10",
+        "guide:b11",
+        "misc1:b4",
+        "leftshoulder:b5",
+        "rightshoulder:b6",
+        "leftstick:b12",
+        "rightstick:b13",
+        "hint:SDL_GAMECONTROLLER_USE_BUTTON_LABELS:=1",
+    ]
+    axis_tokens = list(NGC_PRO_AXES[:-1]) + hat_tokens + [NGC_PRO_AXES[-1]]
+    return ",".join([guid, name, *buttons, *axis_tokens])
+
+
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
     if not mapping:
         return None
-    if "gamecube" in name.lower():
+    low = name.lower()
+    if "gamecube" in low:
         return fix_gamecube_mapping(mapping)
+    if "pro controller 2" in low or "joy-con 2" in low:
+        return fix_pro_mapping(mapping)
     return mapping
 
 

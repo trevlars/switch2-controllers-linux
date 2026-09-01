@@ -60,12 +60,17 @@ SKIP_NAME_PARTS = (
     "motion sensors",
 )
 
-# Virtual pads created by Sunshine/Moonlight (not local Bluetooth/USB).
+# Virtual pads created by Sunshine/Moonlight / Steam Remote Play (not local BT/USB).
 VIRTUAL_KINDS = frozenset({"steam_virtual", "stream_ds5", "moonlight_x360"})
+# Steam Link / Moonlight Xbox pads — take P1 when present, else ignore.
+REMOTE_XBOX_KINDS = frozenset({"steam_virtual", "moonlight_x360"})
 
 PROFILE_BY_KIND = {
     "gamecube_nso": "GC_nso_gamecube",
     "switch2_pro": "GC_switch2_pro_bt",
+    "joycon2": "GC_switch2_pro_bt",
+    "joycon2_left": "GC_switch2_pro_bt",
+    "joycon2_right": "GC_switch2_pro_bt",
     "exlene": "GC_exlene_bt",
     "dualsense": "GC_dualsense_bt",
     "stream_ds5": "GC_dualsense_bt",
@@ -129,6 +134,14 @@ def classify(name: str) -> str | None:
         return "gamecube_nso"
     if "pro controller 2" in low or "switch 2 pro" in low or "switch2 pro" in low:
         return "switch2_pro"
+    if "joy-con 2" in low or "joycon 2" in low:
+        if "right" in low:
+            return "joycon2_right"
+        if "left" in low:
+            return "joycon2_left"
+        return "joycon2"
+    if "bazzite link pad" in low:
+        return "steam_virtual"
     if re.search(r"x-box 360 pad\s*(\d+)", low) or "xbox 360" in low:
         return "steam_virtual"
     if "xbox series x controller" in low or "steam virtual gamepad" in low:
@@ -218,11 +231,80 @@ def virtual_pad_steam_slot(name: str) -> int | None:
     return None
 
 
+
+GEMMA_ACCOUNT_ID = 708606858
+# ngc bridge pads expose Nintendo diamond face buttons (A=SOUTH, B=EAST, …).
+NINTENDO_LAYOUT_KINDS = frozenset({
+    "switch2_pro",
+    "joycon2",
+    "joycon2_left",
+    "joycon2_right",
+    "gamecube_nso",
+    "n64_nso",
+})
+
+
+def active_steam_account_id() -> int | None:
+    """Best-effort active Steam userdata id (e.g. Gemma 708606858)."""
+    helper = Path.home() / ".local/bin/get-active-steam-user.sh"
+    if helper.is_file():
+        try:
+            out = subprocess.check_output([str(helper)], text=True, timeout=3)
+            for line in out.splitlines():
+                if line.startswith("account_id="):
+                    return int(line.split("=", 1)[1].strip())
+        except (subprocess.SubprocessError, ValueError, OSError):
+            pass
+    return None
+
+
+def gemma_physical_pad_order_enabled() -> bool:
+    """Gemma Steam profile: Exlene P1 if present, else DualSense P1 (USB/VH).
+
+    Env BAZZITE_GEMMA_DS_ORDER=always|never|auto (default auto = when Gemma active).
+    """
+    mode = os.environ.get("BAZZITE_GEMMA_DS_ORDER", "auto").strip().lower()
+    if mode in {"never", "0", "false", "no"}:
+        return False
+    if mode in {"always", "1", "true", "yes", "force"}:
+        return True
+    return active_steam_account_id() == GEMMA_ACCOUNT_ID
+
+
+def want_remote_xbox_p1() -> bool:
+    """Link/X360 takes P1 only when explicitly wanted or a live stream is up.
+
+    Local projector play (Switch 2 / NSO pads) must not lose P1 to a leftover
+    Sunshine X360 device after Gemma's Steam Link session ends.
+
+    When Gemma is active with DualSense (VH USB) and/or Exlene, those physical
+    pads own P1/P2 — do not let Sunshine x360 shells steal the slots.
+    """
+    prefer = os.environ.get("BAZZITE_REMOTE_XBOX_P1", "auto").strip().lower()
+    if prefer in {"never", "0", "false", "no"}:
+        return False
+    if prefer in {"always", "1", "true", "yes", "force"}:
+        return True
+    # Gemma + physical DualSense/Exlene: checked later in detect_pads once pads known.
+    # auto: only during an active stream / explicit remote-play env
+    if os.environ.get("BAZZITE_STEAM_REMOTE_PLAY", "").strip().lower() in {
+        "1", "true", "yes",
+    }:
+        return True
+    return in_stream_session()
+
 def in_stream_session() -> bool:
+    """True only for a live Moonlight/Sunshine session (not leftover virtual pads)."""
     for key in os.environ:
         if key.startswith("SUNSHINE_") or key.startswith("MOONLIGHT_"):
             return True
     if os.environ.get("BAZZITE_SUNSHINE_STREAM") in {"1", "true", "yes"}:
+        return True
+    # Set by sunshine-stream-prep.sh for the duration of an active client stream.
+    flag = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / (
+        "bazzite-sunshine-stream-active"
+    )
+    if flag.exists():
         return True
     return False
 
@@ -237,6 +319,76 @@ def in_steam_session() -> bool:
     return False
 
 
+def remote_play_xbox_js_nodes() -> list[str]:
+    """Host-side Steam Remote Play / Steam Link Xbox pads (uinput x360)."""
+    import array
+    import fcntl
+
+    def js_name(path: str) -> str:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            # chmod 000 (e.g. hidden ASRock LED js0) — fall back to sysfs name
+            try:
+                sysfs = Path("/sys/class/input") / Path(path).name / "device" / "name"
+                return sysfs.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                return ""
+        try:
+            buf = array.array("B", [0] * 128)
+            # JSIOCGNAME(len) = _IOC(_IOC_READ, 'j', 0x13, len)
+            ioc = (2 << 30) | (128 << 16) | (ord("j") << 8) | 0x13
+            fcntl.ioctl(fd, ioc, buf)
+            return bytes(buf).split(b"\0", 1)[0].decode("utf-8", "replace")
+        except OSError:
+            try:
+                sysfs = Path("/sys/class/input") / Path(path).name / "device" / "name"
+                return sysfs.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                return ""
+        finally:
+            os.close(fd)
+
+    nodes: list[str] = []
+    for path in sorted(glob.glob("/dev/input/js*")):
+        name = js_name(path)
+        if re.search(r"x-box 360 pad\s*\d+", name, re.I) or re.search(
+            r"steam virtual gamepad", name, re.I
+        ):
+            nodes.append(path)
+    return nodes
+
+
+def in_steam_remote_play() -> bool:
+    """True when a Steam Link / Remote Play Xbox pad is attached on the host."""
+    if os.environ.get("BAZZITE_STEAM_REMOTE_PLAY") in {"1", "true", "yes"}:
+        return True
+    if remote_play_xbox_js_nodes():
+        return True
+    try:
+        text = Path("/proc/bus/input/devices").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return bool(re.search(r'Name="Microsoft X-Box 360 pad\s*\d+"', text, re.I))
+
+
+def ensure_sdl_sees_remote_xbox() -> None:
+    """SDL udev enum sometimes misses uinput x360 pads; pin them via env hint."""
+    nodes = remote_play_xbox_js_nodes()
+    if not nodes:
+        return
+    existing = [
+        p
+        for p in os.environ.get("SDL_JOYSTICK_DEVICE", "").split(":")
+        if p.strip()
+    ]
+    merged = existing[:]
+    for n in nodes:
+        if n not in merged:
+            merged.append(n)
+    os.environ["SDL_JOYSTICK_DEVICE"] = ":".join(merged)
+
+
 def dolphin_backend() -> str:
     return os.environ.get("BAZZITE_DOLPHIN_BACKEND", "sdl").strip().lower()
 
@@ -248,6 +400,9 @@ def list_sdl_gamepads(*, include_steam_virtual: bool) -> list[dict]:
         return []
 
     import ctypes
+
+    if include_steam_virtual:
+        ensure_sdl_sees_remote_xbox()
 
     sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER | sdl2.SDL_INIT_JOYSTICK)
     pads: list[dict] = []
@@ -377,30 +532,68 @@ def enrich_pad(raw: dict) -> Pad:
     )
 
 
-def order_pads(pads: list[Pad]) -> list[Pad]:
-    # Dolphin / global: P1 GC, P2 EXLENE, P3 Switch 2 Pro, P4 DualSense.
-    priority = {
-        "gamecube_nso": 0,
-        "exlene": 1,
-        "switch2_pro": 2,
-        "dualsense": 3,
-        "stream_ds5": 3,
-        "mcon": 4,
-        "n64_nso": 5,
-        "xbox": 6,
-    }
+def order_pads(pads: list[Pad], *, gemma_physical: bool = False) -> list[Pad]:
+    # Dolphin / global: Remote Play Xbox first when present, then
+    # P1 GC, P2 EXLENE, P3 Switch 2 Pro, P4 DualSense.
+    #
+    # Gemma Steam profile + DualSense (USB/VH) and/or Exlene:
+    #   Exlene → P1 if present, DualSense → P1 alone or P2 with Exlene.
+    #   Sunshine/Link x360 shells sort after physical pads.
+    if gemma_physical:
+        priority = {
+            "exlene": 0,
+            "dualsense": 1,
+            "stream_ds5": 1,
+            "gamecube_nso": 2,
+            "switch2_pro": 3,
+            "joycon2": 3,
+            "joycon2_left": 3,
+            "joycon2_right": 3,
+            "mcon": 4,
+            "n64_nso": 5,
+            "xbox": 6,
+            "moonlight_x360": 90,
+            "steam_virtual": 91,
+        }
+        remote_first = False
+    else:
+        priority = {
+            "steam_virtual": -2,
+            "moonlight_x360": -1,
+            "gamecube_nso": 0,
+            "exlene": 1,
+            "switch2_pro": 2,
+            "joycon2": 2,
+            "joycon2_left": 2,
+            "joycon2_right": 2,
+            "dualsense": 3,
+            "stream_ds5": 3,
+            "mcon": 4,
+            "n64_nso": 5,
+            "xbox": 6,
+        }
+        remote_first = want_remote_xbox_p1()
 
     # Per-launcher boost, e.g. BAZZITE_PAD_PRIORITY="n64_nso" makes the NSO N64
     # pad player 1 for N64 cores even when the full game-night set is connected.
+    # Remote Play Xbox still wins unless explicitly disabled.
     boost = [
         k.strip()
         for k in os.environ.get("BAZZITE_PAD_PRIORITY", "").split(",")
         if k.strip()
     ]
+    if gemma_physical and not boost:
+        boost = ["exlene", "dualsense"]
 
     def sort_key(p: Pad) -> tuple:
+        if remote_first and p.kind in {"steam_virtual", "moonlight_x360"}:
+            slot = p.steam_slot if p.steam_slot is not None else 0
+            return (-1, slot, priority.get(p.kind, -1), p.evdev_idx)
         if p.kind in boost:
             return (0, boost.index(p.kind), 0, p.evdev_idx)
+        if gemma_physical:
+            # Ignore fixed Steam LED slots — Exlene/DualSense order is explicit.
+            return (1, priority.get(p.kind, 50), p.evdev_idx)
         slot = p.steam_slot if p.steam_slot is not None else 99
         kind_rank = priority.get(p.kind, 50)
         return (1, slot, kind_rank, p.evdev_idx)
@@ -452,11 +645,19 @@ def finalize_device_indices(pads: list[Pad]) -> list[Pad]:
 
 def detect_pads() -> list[Pad]:
     mode = os.environ.get("BAZZITE_INCLUDE_VIRTUAL_XBOX", "auto").strip().lower()
-    stream_pad = os.environ.get("BAZZITE_STREAM_GAMEPAD", "ds5").strip().lower()
+    stream_pad = os.environ.get("BAZZITE_STREAM_GAMEPAD", "x360").strip().lower()
+    remote_play = in_steam_remote_play() and want_remote_xbox_p1()
+    # Steam Link USB Xbox → host "Microsoft X-Box 360 pad N". Prefer that
+    # over Sunshine's default DS5 virtual preference when Remote Play is live.
+    if remote_play and stream_pad in {"ds5", "ds4", "dualsense", "auto", ""}:
+        if os.environ.get("BAZZITE_STREAM_GAMEPAD", "").strip() == "":
+            stream_pad = "x360"
 
     backend = dolphin_backend()
+    want_virtual = (mode == "always" or mode == "1" or mode == "true"
+                   or (mode not in {"never", "0", "false", "no"} and want_remote_xbox_p1()))
     if backend == "sdl":
-        all_raw = list_sdl_gamepads(include_steam_virtual=True)
+        all_raw = list_sdl_gamepads(include_steam_virtual=want_virtual)
         # Pads like OhSnap MCON often appear on evdev but not in SDL; keep them.
         def norm_name(n: str) -> str:
             # SDL prefixes kernel names ("N64 Controller" -> "Nintendo N64
@@ -465,7 +666,9 @@ def detect_pads() -> list[Pad]:
             return " ".join(words)
 
         claimed: set[int] = set()
-        for p in list_gamepads(include_steam_virtual=False):
+        # Include steam_virtual from evdev too — SDL udev often misses uinput
+        # x360 pads until SDL_JOYSTICK_DEVICE is set (handled above).
+        for p in list_gamepads(include_steam_virtual=want_virtual):
             match = None
             for i, s in enumerate(all_raw):
                 if i in claimed:
@@ -485,20 +688,23 @@ def detect_pads() -> list[Pad]:
                 if s.get("udev_idx") is None:
                     s["udev_idx"] = p.get("udev_idx")
         if not all_raw:
-            all_raw = list_gamepads(include_steam_virtual=True)
+            all_raw = list_gamepads(include_steam_virtual=want_virtual)
     else:
-        all_raw = list_gamepads(include_steam_virtual=True)
+        all_raw = list_gamepads(include_steam_virtual=want_virtual)
     enriched = [enrich_pad(p) for p in all_raw]
     physical = [p for p in enriched if p.kind not in VIRTUAL_KINDS]
     virtual = [p for p in enriched if p.kind in VIRTUAL_KINDS]
 
-    if stream_pad in {"ds5", "ds4", "dualsense"}:
+    if stream_pad in {"ds5", "ds4", "dualsense"} and not remote_play:
         ds5_virtual = [p for p in virtual if p.kind in {"stream_ds5", "dualsense"}]
         virtual = ds5_virtual
-    elif stream_pad in {"x360", "xbox"}:
-        virtual = [p for p in virtual if p.kind in {"moonlight_x360", "steam_virtual"}]
+    elif stream_pad in {"x360", "xbox"} or remote_play:
+        # Keep Remote Play / Moonlight Xbox pads; drop unrelated stream DS5 noise.
+        x360 = [p for p in virtual if p.kind in {"moonlight_x360", "steam_virtual"}]
+        if x360:
+            virtual = x360
 
-    if in_stream_session() and virtual:
+    if in_stream_session() and virtual and not remote_play:
         ds5 = [p for p in virtual if p.kind == "stream_ds5"]
         x360 = [p for p in virtual if p.kind in {"moonlight_x360", "steam_virtual"}]
         virtual = ds5 + x360 if ds5 else virtual
@@ -510,11 +716,23 @@ def detect_pads() -> list[Pad]:
     if steam_fallback == "auto" and in_steam_session() and virtual:
         use_steam_virtual = True
 
+    gemma_kinds = {p.kind for p in physical}
+    gemma_physical = gemma_physical_pad_order_enabled() and bool(
+        gemma_kinds
+        & ({"dualsense", "exlene", "stream_ds5"} | NINTENDO_LAYOUT_KINDS)
+    )
+
     if mode == "never":
         merged = physical
     elif mode in {"always", "1", "true", "yes"}:
         merged = physical + virtual
-    elif in_stream_session():
+    elif gemma_physical:
+        # Gemma + DualSense (VH) / Exlene: emulators bind only those physical pads
+        # so Sunshine x360 shells do not fill P2–P4.
+        merged = physical
+    elif remote_play or in_stream_session():
+        # Remote Play / Sunshine: keep local pads, but include the stream pad
+        # so order_pads can put the Link Xbox (or Moonlight pad) at P1.
         merged = physical + virtual
     elif use_steam_virtual and virtual:
         merged = virtual
@@ -526,10 +744,20 @@ def detect_pads() -> list[Pad]:
     # Keep controllers distinct by device path so two same-model pads
     # (common in local multiplayer) do not collapse into one slot.
     dedup: dict[str, Pad] = {}
-    for p in order_pads(merged):
+    for p in order_pads(merged, gemma_physical=gemma_physical):
         if p.path not in dedup:
             dedup[p.path] = p
     pads = finalize_device_indices(list(dedup.values()))
+
+    # Gemma layout: rewrite steam_slot LEDs to match Exlene→P1 / DualSense→P2.
+    if gemma_physical:
+        rewritten: list[Pad] = []
+        for i, p in enumerate(pads):
+            if p.kind in {"exlene", "dualsense", "stream_ds5"} or p.kind not in VIRTUAL_KINDS:
+                rewritten.append(replace(p, steam_slot=i))
+            else:
+                rewritten.append(p)
+        pads = rewritten
     # Normalize stale Steam LED slots only when no fixed kind/MAC layout is in use.
     uses_fixed_layout = any(
         p.kind in FIXED_KIND_SLOTS or known_mac_kind(p.mac) for p in pads
@@ -594,11 +822,12 @@ def parse_gcpad_blocks(text: str) -> dict[int, str]:
 
 
 # Fixed Dolphin ports: P1 GC, P2 EXLENE, P3 Switch 2 Pro, P4 DualSense.
-# Absolute slots (not compacted) — NSO GameCube is always GCPad1 when connected.
+# Absolute slots (not compacted) — NSO GameCube is always GCPad1 when connected,
+# unless a Steam Link / Remote Play Xbox pad is present (then that is GCPad1).
 DOLPHIN_FIXED_SLOTS = (
     ("gamecube_nso",),
     ("exlene",),
-    ("switch2_pro",),
+    ("switch2_pro", "joycon2", "joycon2_left", "joycon2_right"),
     ("dualsense", "stream_ds5"),
 )
 
@@ -607,8 +836,46 @@ def _pads_for_dolphin_slots(pads: list[Pad], max_ports: int = 4) -> list[Pad | N
     by_kind: dict[str, list[Pad]] = {}
     for p in pads:
         by_kind.setdefault(p.kind, []).append(p)
-    out: list[Pad | None] = []
-    for kinds in DOLPHIN_FIXED_SLOTS[:max_ports]:
+
+    gemma = gemma_physical_pad_order_enabled() and any(
+        p.kind in {"dualsense", "exlene", "stream_ds5"} | NINTENDO_LAYOUT_KINDS for p in pads
+    )
+    if gemma:
+        # Compact order from detect_pads: Exlene then DualSense (already sorted).
+        physical = [p for p in pads if p.kind not in VIRTUAL_KINDS]
+        out: list[Pad | None] = list(physical[:max_ports])
+        while len(out) < max_ports:
+            out.append(None)
+        return out
+
+    # Steam Link / Remote Play: always temp-override GCPad1 with the host
+    # X360 pad when present (Exlene/ZhiXu on the Link box). Local fixed slots
+    # shift down for that session only.
+    remote_first = want_remote_xbox_p1()
+    remote: Pad | None = None
+    if remote_first:
+        for k in ("steam_virtual", "moonlight_x360"):
+            cands = by_kind.get(k) or []
+            if cands:
+                remote = cands.pop(0)
+                break
+        # Also honor explicit remote-play env even if kind tagging lagged.
+        if remote is None and os.environ.get("BAZZITE_STEAM_REMOTE_PLAY", "").strip().lower() in {
+            "1", "true", "yes",
+        }:
+            for k in ("steam_virtual", "moonlight_x360", "xbox"):
+                cands = by_kind.get(k) or []
+                if cands:
+                    remote = cands.pop(0)
+                    break
+
+    out = []
+    if remote is not None:
+        out.append(remote)
+
+    for kinds in DOLPHIN_FIXED_SLOTS:
+        if len(out) >= max_ports:
+            break
         chosen = None
         for k in kinds:
             cands = by_kind.get(k) or []
@@ -616,9 +883,10 @@ def _pads_for_dolphin_slots(pads: list[Pad], max_ports: int = 4) -> list[Pad | N
                 chosen = cands.pop(0)
                 break
         out.append(chosen)
+
     while len(out) < max_ports:
         out.append(None)
-    return out
+    return out[:max_ports]
 
 
 def apply_dolphin(pads: list[Pad], max_ports: int = 4) -> list[str]:
@@ -630,6 +898,9 @@ def apply_dolphin(pads: list[Pad], max_ports: int = 4) -> list[str]:
     logs: list[str] = []
     new_blocks: list[str] = []
     slot_pads = _pads_for_dolphin_slots(pads, max_ports)
+    remote_p1 = bool(
+        slot_pads and slot_pads[0] is not None and slot_pads[0].kind in REMOTE_XBOX_KINDS
+    )
 
     for port in range(1, max_ports + 1):
         pad = slot_pads[port - 1] if port - 1 < len(slot_pads) else None
@@ -638,9 +909,13 @@ def apply_dolphin(pads: list[Pad], max_ports: int = 4) -> list[str]:
             labels = {
                 "gamecube_nso": "NSO GameCube",
                 "switch2_pro": "Switch 2 Pro",
+                "joycon2": "Joy-Con 2",
+                "joycon2_left": "Joy-Con 2 (L)",
+                "joycon2_right": "Joy-Con 2 (R)",
                 "exlene": "EXLENE",
                 "dualsense": "DualSense",
                 "stream_ds5": "Moonlight DS5",
+                "steam_virtual": "Steam Link Xbox",
                 "moonlight_x360": "Moonlight X360",
                 "n64_nso": "NSO N64",
             }
@@ -662,11 +937,14 @@ def apply_dolphin(pads: list[Pad], max_ports: int = 4) -> list[str]:
                 logs.append(f"GCPad{port} <- (empty — waiting for slot pad)")
         else:
             block = gcpad_block(port, None).rstrip("\n")
-            want = (
-                "/".join(DOLPHIN_FIXED_SLOTS[port - 1])
-                if port - 1 < len(DOLPHIN_FIXED_SLOTS)
-                else "pad"
-            )
+            if remote_p1 and port >= 2 and (port - 2) < len(DOLPHIN_FIXED_SLOTS):
+                want = "/".join(DOLPHIN_FIXED_SLOTS[port - 2])
+            else:
+                want = (
+                    "/".join(DOLPHIN_FIXED_SLOTS[port - 1])
+                    if port - 1 < len(DOLPHIN_FIXED_SLOTS)
+                    else "pad"
+                )
             logs.append(f"GCPad{port} <- (empty — waiting for {want})")
         new_blocks.append(block)
 
@@ -782,6 +1060,9 @@ EDEN_SLOT_CACHE = Path.home() / ".config/bazzite/controller-sync/eden-fixed-slot
 EDEN_PROFILE_BY_KIND = {
     "gamecube_nso": "gc",
     "switch2_pro": "switch 2 pro",
+    "joycon2": "joy-con 2",
+    "joycon2_left": "joy-con 2 left",
+    "joycon2_right": "joy-con 2 right",
     "exlene": "exlene",
     "dualsense": "DS5",
     "stream_ds5": "DS5",
@@ -793,12 +1074,12 @@ EDEN_PROFILE_BY_KIND = {
     "generic": "switch 2 pro",
 }
 # Xbox-layout pads need face-button swap for Switch (A=East, B=South).
+# steam_virtual (Steam Link X360) intentionally omitted: Exlene/ZhiXu through
+# the Link already maps to correct Switch positions; swapping inverted A/B+X/Y
+# on Remote Play only (local Exlene binding is unchanged).
 EDEN_FACE_SWAP_KINDS = frozenset({
-    "dualsense", "stream_ds5", "mcon", "xbox", "steam_virtual", "moonlight_x360",
+    "dualsense", "stream_ds5", "mcon", "xbox", "moonlight_x360",
 })
-# Pro 2 bridge uses Xbox letter→evdev placement, so SDL X/Y land on the
-# opposite Nintendo face buttons. Swap only X/Y (A/B already feel right).
-EDEN_XY_SWAP_KINDS = frozenset({"switch2_pro"})
 DSU_GUID = "0000000000000000000000007f000001"
 DSU_PORT = 26760
 
@@ -893,11 +1174,12 @@ def _eden_build_bindings_from_sdl(pad: "Pad", eden_port: int) -> dict[str, str]:
     }
     sdl2.SDL_GameControllerClose(ctrl)
 
-    # Face buttons: Xbox-layout pads need Switch diamond remap.
+    # Face buttons: Xbox-layout pads need Switch diamond remap; ngc Nintendo pads
+    # (Pro 2 / Joy-Con 2 / NSO GC) already expose A=SOUTH, B=EAST, X=WEST, Y=NORTH.
     if pad.kind in EDEN_FACE_SWAP_KINDS:
         face_a, face_b, face_x, face_y = raw["b"], raw["a"], raw["y"], raw["x"]
-    elif pad.kind in EDEN_XY_SWAP_KINDS:
-        face_a, face_b, face_x, face_y = raw["a"], raw["b"], raw["y"], raw["x"]
+    elif pad.kind in NINTENDO_LAYOUT_KINDS:
+        face_a, face_b, face_x, face_y = raw["a"], raw["b"], raw["x"], raw["y"]
     else:
         face_a, face_b, face_x, face_y = raw["a"], raw["b"], raw["x"], raw["y"]
 
@@ -976,7 +1258,7 @@ def _eden_motion(pad: "Pad", guid: str, eden_port: int) -> str:
             f'"engine:cemuhookudp,guid:{DSU_GUID},port:{DSU_PORT},'
             f'pad:{dsu_pad},motion:0"'
         )
-    if guid and pad.kind in ("dualsense", "stream_ds5", "switch2_pro", "exlene"):
+    if guid and pad.kind in ("dualsense", "stream_ds5", "switch2_pro", "joycon2", "joycon2_left", "joycon2_right", "exlene"):
         g = _eden_guid_for_eden(guid)
         return f'"engine:sdl,port:{eden_port},guid:{g},motion:0"'
     return "[empty]"
@@ -1014,7 +1296,7 @@ def _eden_player_block(player: int, pad: "Pad", eden_port: int) -> list[str]:
 # Eden / Switch fixed slots (do NOT compact — keeps DS5 on P3 and N64 on P4).
 # P1 Switch 2 Pro, P2 NSO GameCube, P3 DualSense, P4 NSO N64.
 EDEN_FIXED_SLOTS = (
-    ("switch2_pro",),
+    ("switch2_pro", "joycon2", "joycon2_left", "joycon2_right"),
     ("gamecube_nso",),
     ("dualsense", "stream_ds5"),
     ("n64_nso",),
@@ -1022,7 +1304,12 @@ EDEN_FIXED_SLOTS = (
 
 # Used only for LED priority / docs when listing.
 EDEN_KIND_PRIORITY = {
+    "steam_virtual": -2,
+    "moonlight_x360": -1,
     "switch2_pro": 0,
+    "joycon2": 0,
+    "joycon2_left": 0,
+    "joycon2_right": 0,
     "gamecube_nso": 1,
     "dualsense": 2,
     "stream_ds5": 2,
@@ -1032,16 +1319,51 @@ EDEN_KIND_PRIORITY = {
     "xbox": 6,
 }
 
-
 def _order_pads_for_eden(pads: list[Pad]) -> list[Optional[Pad]]:
-    """Return length-4 list; missing kinds are None (slot stays empty)."""
+    """Return length-4 list; missing kinds are None (slot stays empty).
+
+    When a Steam Link / Remote Play Xbox pad is present, it takes P1 and the
+    usual fixed kinds fill P2–P4. When it's gone, P1 reverts to Switch 2 Pro.
+
+    Gemma + DualSense/Exlene: compact order (Exlene then DualSense) like Dolphin.
+    """
+    gemma = gemma_physical_pad_order_enabled() and any(
+        p.kind in {"dualsense", "exlene", "stream_ds5"} | NINTENDO_LAYOUT_KINDS for p in pads
+    )
+    if gemma:
+        physical = [
+            p
+            for p in pads
+            if p.kind not in VIRTUAL_KINDS
+            and (p.sdl_guid or p.path.startswith("/dev/") or p.path.startswith("sdl:"))
+        ]
+        out: list[Optional[Pad]] = list(physical[:4])
+        while len(out) < 4:
+            out.append(None)
+        return out
+
     by_kind: dict[str, list[Pad]] = {}
     for p in pads:
         if not p.sdl_guid or p.sdl_idx is None:
             continue
         by_kind.setdefault(p.kind, []).append(p)
-    out: list[Optional[Pad]] = []
+
+    remote_first = want_remote_xbox_p1()
+    remote: Optional[Pad] = None
+    if remote_first:
+        for k in ("steam_virtual", "moonlight_x360"):
+            cands = by_kind.get(k) or []
+            if cands:
+                remote = cands.pop(0)
+                break
+
+    out = []
+    if remote is not None:
+        out.append(remote)
+
     for kinds in EDEN_FIXED_SLOTS:
+        if len(out) >= 4:
+            break
         chosen = None
         for k in kinds:
             cands = by_kind.get(k) or []
@@ -1049,7 +1371,10 @@ def _order_pads_for_eden(pads: list[Pad]) -> list[Optional[Pad]]:
                 chosen = cands.pop(0)
                 break
         out.append(chosen)
-    return out
+
+    while len(out) < 4:
+        out.append(None)
+    return out[:4]
 
 
 def _eden_empty_player_block(player: int) -> list[str]:
@@ -1116,14 +1441,20 @@ def _eden_player_block_from_cache(player: int, entry: dict) -> list[str]:
 
 
 def apply_eden(pads: list[Pad], max_players: int = 4) -> list[str]:
-    """Rebind Eden P1–P4 to fixed kinds (Pro2 / GC / DS5 / N64)."""
-    slots = _order_pads_for_eden(
-        [p for p in pads if p.sdl_guid and p.sdl_idx is not None]
+    """Rebind Eden P1–P4: Remote Play Xbox as P1 when present, else fixed kinds."""
+    gemma = gemma_physical_pad_order_enabled() and any(
+        p.kind in {"dualsense", "exlene", "stream_ds5"} | NINTENDO_LAYOUT_KINDS for p in pads
     )
+    if gemma:
+        candidates = list(pads)
+    else:
+        candidates = [p for p in pads if p.sdl_guid and p.sdl_idx is not None]
+    slots = _order_pads_for_eden(candidates)
     cache = _eden_load_slot_cache()
     logs: list[str] = []
     guid_seen: dict[str, int] = {}
     blocks: list[str] = []
+    remote_p1 = bool(slots and slots[0] is not None and slots[0].kind in REMOTE_XBOX_KINDS)
     for player in range(max(max_players, 4)):
         pad = slots[player] if player < len(slots) else None
         if pad is not None:
@@ -1133,8 +1464,19 @@ def apply_eden(pads: list[Pad], max_players: int = 4) -> list[str]:
             block = _eden_player_block(player, pad, eden_port)
             bindings = _eden_build_bindings_from_sdl(pad, eden_port)
             motion = _eden_motion(pad, g, eden_port)
-            if bindings:
-                _eden_cache_pad(cache, player, pad, bindings, motion)
+            # Only cache fixed-kind pads into their home slots so a temporary
+            # Remote Play Xbox on P1 does not wipe the Switch 2 Pro binding.
+            if bindings and pad.kind not in REMOTE_XBOX_KINDS:
+                home = next(
+                    (
+                        i
+                        for i, kinds in enumerate(EDEN_FIXED_SLOTS)
+                        if pad.kind in kinds
+                    ),
+                    None,
+                )
+                if home is not None:
+                    _eden_cache_pad(cache, home, pad, bindings, motion)
             blocks.extend(block)
             a_line = next((ln for ln in block if ln.startswith(f"player_{player}_button_a=")), "")
             prof = next(
@@ -1150,8 +1492,23 @@ def apply_eden(pads: list[Pad], max_players: int = 4) -> list[str]:
             continue
 
         # Slot empty live — keep last known DualSense/N64/etc so Eden doesn't show Any.
-        cached = cache.get(str(player))
-        expected_kinds = EDEN_FIXED_SLOTS[player] if player < len(EDEN_FIXED_SLOTS) else ()
+        # When Remote Play owns P1, fixed-kind caches map to shifted slots (P2+).
+        # Gemma DualSense/Exlene compact mode: do not revive offline Trevor pads.
+        if gemma:
+            blocks.extend(_eden_empty_player_block(player))
+            logs.append(f"Eden P{player + 1} <- (empty)")
+            continue
+        cached = None
+        expected_kinds: tuple[str, ...] = ()
+        if remote_p1:
+            # P1 empty without a live remote pad shouldn't happen here; P2+ map
+            # to fixed slots 0..2
+            if player >= 1 and (player - 1) < len(EDEN_FIXED_SLOTS):
+                expected_kinds = EDEN_FIXED_SLOTS[player - 1]
+                cached = cache.get(str(player - 1))
+        else:
+            expected_kinds = EDEN_FIXED_SLOTS[player] if player < len(EDEN_FIXED_SLOTS) else ()
+            cached = cache.get(str(player))
         if cached and cached.get("kind") in expected_kinds and cached.get("bindings"):
             blocks.extend(_eden_player_block_from_cache(player, cached))
             logs.append(
@@ -1242,8 +1599,15 @@ def main() -> int:
     if args.dolphin:
         for line in apply_dolphin(pads, args.max_players):
             print(line)
-        for line in apply_wiimote(pads, args.max_players):
-            print(line)
+        # WiimoteNew.ini is left alone by default so Wii titles keep their
+        # emulated-Wiimote / pointer setup. Opt in with BAZZITE_SYNC_WIIMOTE=1.
+        if os.environ.get("BAZZITE_SYNC_WIIMOTE", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            for line in apply_wiimote(pads, args.max_players):
+                print(line)
+        else:
+            print("Wiimote: preserved (untouched)")
 
     if args.retroarch:
         for line in write_retroarch_overlay(pads, Path(args.retroarch), args.max_players):
@@ -1253,18 +1617,10 @@ def main() -> int:
         for line in apply_eden(pads, args.max_players):
             print(line)
 
-    # Player LEDs: explicit --leds, or auto after eden/dolphin if that emu is running.
+    # Player LEDs: only when --leds is explicitly passed.
+    # Auto-inferring from running emulators raced Eden vs Dolphin and flipped
+    # Pro P1<->P3 every few seconds (breaks pad names + input).
     led_mode = args.leds
-    if led_mode is None:
-        ps = ""
-        try:
-            ps = subprocess.check_output(["ps", "-eo", "args"], text=True, timeout=2)
-        except Exception:
-            ps = ""
-        if args.eden and re.search(r"/bin/eden\b|Eden\.AppImage|eden-game\.sh", ps):
-            led_mode = "eden"
-        elif args.dolphin and re.search(r"[Dd]olphin|dolphin-game\.sh", ps):
-            led_mode = "dolphin"
     if led_mode:
         led_script = Path.home() / ".local/bin/bazzite-set-player-leds.py"
         if led_script.is_file():

@@ -25,6 +25,9 @@ RA_OVERLAY = Path("/run/user/1000/bazzite-retroarch-input.cfg")
 NICE = {
     "gamecube_nso": "NSO GameCube (bridge)",
     "switch2_pro": "Switch 2 Pro (bridge)",
+    "joycon2": "Joy-Con 2 (bridge)",
+    "joycon2_left": "Joy-Con 2 L (bridge)",
+    "joycon2_right": "Joy-Con 2 R (bridge)",
     "dualsense": "DualSense",
     "mcon": "MCON",
     "xbox": "MCON (xbox mode)",

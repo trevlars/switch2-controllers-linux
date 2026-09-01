@@ -37,6 +37,11 @@ DOLPHIN_PROF="$HOME/.var/app/org.DolphinEmu.dolphin-emu/config/dolphin-emu/Profi
 if [ -d "$DOLPHIN_PROF" ]; then
   install -m 0644 "$SYS/dolphin/GC_nso_gamecube.ini" "$DOLPHIN_PROF/GC_nso_gamecube.ini"
   echo "installed $DOLPHIN_PROF/GC_nso_gamecube.ini"
+  if [ -f "$SYS/dolphin/GC_switch2_pro_bt.ini" ]; then
+    install -m 0644 "$SYS/dolphin/GC_switch2_pro_bt.ini" \
+      "$DOLPHIN_PROF/GC_switch2_pro_bt.ini"
+    echo "installed $DOLPHIN_PROF/GC_switch2_pro_bt.ini"
+  fi
 else
   echo "skip Dolphin profile (dir not found)"
 fi
@@ -98,6 +103,14 @@ fi
 LED_DST="$HOME/.local/bin/bazzite-set-player-leds.py"
 install -m 0755 "$SYS/bazzite-set-player-leds.py" "$LED_DST"
 echo "installed $LED_DST"
+install -m 0755 "$SYS/bazzite-reorder-on-nso-connect.sh" \
+  "$HOME/.local/bin/bazzite-reorder-on-nso-connect.sh"
+echo "installed $HOME/.local/bin/bazzite-reorder-on-nso-connect.sh"
+install -m 0755 "$SYS/bluetooth-always-on.sh" "$HOME/.local/bin/bluetooth-always-on.sh"
+echo "installed $HOME/.local/bin/bluetooth-always-on.sh"
+install -m 0755 "$SYS/bazzite-nso-gc-watchdog.sh" \
+  "$HOME/.local/bin/bazzite-nso-gc-watchdog.sh"
+echo "installed $HOME/.local/bin/bazzite-nso-gc-watchdog.sh"
 if [ -f "$PROJECT_DIR/tools/bazzite-controller-status" ]; then
   install -m 0755 "$PROJECT_DIR/tools/bazzite-controller-status" \
     "$HOME/.local/bin/bazzite-controller-status"

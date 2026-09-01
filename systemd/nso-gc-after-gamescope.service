@@ -1,0 +1,11 @@
+[Unit]
+Description=Restart Switch 2 bridge after Game Mode session start
+After=gamescope-session-plus@ogui-steam.service
+PartOf=gamescope-session-plus@ogui-steam.service
+
+[Service]
+Type=oneshot
+# Steam re-enables BT policy a few seconds into Game Mode; only nudge the bridge
+# when no pads are connected — try-restart kills live BLE sessions.
+ExecStart=%h/.local/bin/nso-gc-after-gamescope.sh
+RemainAfterExit=yes

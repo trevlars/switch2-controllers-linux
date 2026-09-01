@@ -31,7 +31,9 @@ LIGHTBAR = {
     5: (255, 180, 0),   # amber
 }
 
-BRIDGE_KINDS = frozenset({"gamecube_nso", "switch2_pro"})
+BRIDGE_KINDS = frozenset({
+    "gamecube_nso", "switch2_pro", "joycon2", "joycon2_left", "joycon2_right",
+})
 
 
 def _ps_args() -> str:
@@ -79,7 +81,7 @@ def order_pads(pads: list[dict], mode: str) -> list[dict | None]:
     """
     if mode == "eden":
         slots = (
-            ("switch2_pro",),
+            ("switch2_pro", "joycon2", "joycon2_left", "joycon2_right"),
             ("gamecube_nso",),
             ("dualsense", "stream_ds5"),
             ("n64_nso",),
@@ -88,7 +90,7 @@ def order_pads(pads: list[dict], mode: str) -> list[dict | None]:
         slots = (
             ("gamecube_nso",),
             ("exlene",),
-            ("switch2_pro",),
+            ("switch2_pro", "joycon2", "joycon2_left", "joycon2_right"),
             ("dualsense", "stream_ds5"),
         )
     by_kind: dict[str, list[dict]] = {}

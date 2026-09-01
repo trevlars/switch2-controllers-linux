@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart stuck nso-gc bridge when saved pads never connect
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bazzite-nso-gc-watchdog.sh

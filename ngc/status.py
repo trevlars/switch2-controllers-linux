@@ -22,6 +22,7 @@ class ControllerState:
     bonded: bool = False
     connected: bool = False
     battery_pct: Optional[int] = None
+    battery_mv: Optional[int] = None
 
 
 @dataclass

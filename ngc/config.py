@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -19,18 +20,43 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 CONFIG_BACKUP = CONFIG_DIR / "config.json.bak"
 
 
+def _adapter_address_from_bluez(hci: str) -> Optional[str]:
+    """Ask BlueZ for an adapter's address over D-Bus (no root needed)."""
+    try:
+        out = subprocess.run(
+            ["busctl", "get-property", "org.bluez", f"/org/bluez/{hci}",
+             "org.bluez.Adapter1", "Address"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    parts = out.stdout.strip().split('"')
+    return parts[1].upper() if len(parts) >= 2 else None
+
+
 def detect_adapter() -> Optional[str]:
-    """Return the first Bluetooth adapter's address from sysfs (no root needed)."""
+    """Return the first Bluetooth adapter's address (no root needed).
+
+    Older kernels expose /sys/class/bluetooth/hciN/address. Some newer ones do
+    not, so fall back to asking BlueZ directly.
+    """
     base = Path("/sys/class/bluetooth")
     if not base.exists():
         return None
-    for hci in sorted(base.iterdir()):
-        addr = hci / "address"
+    names = [hci.name for hci in sorted(base.iterdir()) if ":" not in hci.name]
+    for name in names:
+        addr = base / name / "address"
         if addr.exists():
             try:
                 return addr.read_text().strip().upper()
             except OSError:
                 continue
+    for name in names:
+        addr_str = _adapter_address_from_bluez(name)
+        if addr_str:
+            return addr_str
     return None
 
 
@@ -49,6 +75,8 @@ class Config:
     button_map: dict = field(default_factory=dict)
     # Rumble: GameCube uses safe presets; Pro/Joy-Con use the real HD motor.
     enable_rumble: bool = True
+    # Magnitude (0..1) at which a GameCube pad switches from soft to strong rumble.
+    gc_impact_threshold: float = 0.52
     # Legacy single-controller fields (migrated into `controllers` on load).
     controller_mac: Optional[str] = None
     player: int = 1

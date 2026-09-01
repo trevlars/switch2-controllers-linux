@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from bleak import BleakScanner
+from bleak.exc import BleakDBusError
 
 from . import att
 from . import protocol as P
@@ -48,8 +49,18 @@ _STATUS_INTERVAL_S = 1.5
 _SCAN_SETTLE_S = 0.10
 # Per-attempt L2CAP connect wait. Short windows fail when Steam keeps LE scan
 # busy; after btmgmt stop-find -l a few hundred ms is enough.
-_CONNECT_ATTEMPT_S = 0.45
+_CONNECT_ATTEMPT_S = 0.80
 _CONNECT_ATTEMPTS = 16
+# Pairing-mode adverts are brief; wake adverts repeat often. A short TTL caused
+# missed connects when Sync was held or the 0.25s scan window slipped.
+_SEEN_TTL_WAKE_S = 4.0
+_SEEN_TTL_PAIRING_S = 45.0
+# Recreate BleakScanner if we stay disconnected despite recent adverts.
+_HUB_IDLE_RESTART_CYCLES = 80  # ~20s at default scan cadence
+
+
+def _seen_ttl(mode: str) -> float:
+    return _SEEN_TTL_PAIRING_S if mode == "pairing" else _SEEN_TTL_WAKE_S
 
 
 def _adapter_index() -> str:
@@ -108,6 +119,19 @@ def _force_le_scan_off(*, force: bool = False) -> None:
                     proc.wait(timeout=0.5)
                 except Exception:  # noqa: BLE001
                     pass
+            proc = subprocess.Popen(
+                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                proc.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=0.5)
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception:  # noqa: BLE001
             pass
 
@@ -150,6 +174,7 @@ def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
 
 
 _REORDER_SCRIPTS = [
+    "~/.local/bin/bazzite-reorder-on-nso-connect.sh",
     "~/.local/bin/bazzite-dolphin-apply-gcpad1.sh",
     "~/.local/bin/bazzite-eden-reset-controllers.py",
 ]
@@ -219,6 +244,7 @@ class _ConnectHub:
         self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._hub_error = ""
         self._scanning = False
+        self._idle_scan_cycles = 0
 
     def register(self, worker: "_Worker") -> None:
         self.workers_by_mac[worker.entry.mac.upper()] = worker
@@ -239,14 +265,36 @@ class _ConnectHub:
         return True
 
     def _run_async(self) -> None:
-        while not self.stop.is_set():
-            try:
-                self._hub_error = ""
-                asyncio.run(self._scan_loop())
-            except Exception as exc:  # noqa: BLE001
-                self._hub_error = str(exc)
-                logger.exception("connect hub crashed; restarting in 1s")
-                time.sleep(1)
+        # Keep ONE event loop for the hub's lifetime: bleak's BlueZDBusScannerManager
+        # is a process-wide singleton whose D-Bus connection binds to the loop it was
+        # first used on, so asyncio.run() per attempt left the manager pinned to a dead loop.
+        backoff = 1.0
+        fails = 0
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while not self.stop.is_set():
+                try:
+                    self._hub_error = ""
+                    loop.run_until_complete(self._scan_loop())
+                    backoff, fails = 1.0, 0
+                except Exception as exc:  # noqa: BLE001
+                    self._hub_error = str(exc)
+                    fails += 1
+                    if fails == 1:
+                        logger.exception("connect hub crashed; restarting in %ss", backoff)
+                    else:
+                        logger.warning(
+                            "connect hub restart %d in %ss (%s)", fails, backoff, exc
+                        )
+                    if isinstance(exc, BleakDBusError) and "InProgress" in str(exc):
+                        prepare_bluez_global()
+                        _force_le_scan_off()
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
 
     async def _scan_loop(self) -> None:
         hub = self
@@ -256,7 +304,7 @@ class _ConnectHub:
             hub._executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=2, thread_name_prefix="ngc-connect"
             )
-        seen_ttl_s = 4.0
+        # legacy; use _seen_ttl(mode) below
 
         def on_adv(device, adv) -> None:
             addr = device.address.upper()
@@ -282,12 +330,36 @@ class _ConnectHub:
 
                 connected_count = len(workers) - len(disconnected)
                 if connected_count:
-                    # Scanning while a pad is linked can drop the live session; brief pause.
-                    await asyncio.sleep(1.0)
+                    # Never scan while a pad holds a live BLE session — scanning for
+                    # the other saved pad drops the connected one within seconds.
+                    hub._scanning = False
+                    hub._idle_scan_cycles = 0
+                    await asyncio.sleep(2.0)
+                    continue
 
-                scan_on_s = 0.12 if connected_count else 0.25
+                scan_on_s = 0.50
                 hub._scanning = True
-                await hub._scanner.start()
+                for scan_attempt in range(1, 4):
+                    try:
+                        await hub._scanner.start()
+                        break
+                    except BleakDBusError as exc:
+                        if "InProgress" not in str(exc):
+                            raise
+                        hub._scanning = False
+                        prepare_bluez_global()
+                        _force_le_scan_off()
+                        logger.warning(
+                            "LE scan held by another client; cleared, retry %d/3",
+                            scan_attempt,
+                        )
+                        await asyncio.sleep(0.5 * scan_attempt)
+                        hub._scanning = True
+                else:
+                    raise BleakDBusError(
+                        "org.bluez.Error.InProgress",
+                        "LE scan still held by another client after 3 clears",
+                    )
                 try:
                     await asyncio.sleep(scan_on_s)
                 finally:
@@ -302,7 +374,7 @@ class _ConnectHub:
                         mac for mac, worker in hub.workers_by_mac.items()
                         if not worker.is_connected()
                         and (seen := hub._last_seen.get(mac)) is not None
-                        and now - seen[0] <= seen_ttl_s
+                        and now - seen[0] <= _seen_ttl(seen[1])
                     ],
                     key=lambda mac: hub._last_seen[mac][0],
                     reverse=True,
@@ -337,10 +409,29 @@ class _ConnectHub:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
                             _force_le_scan_off(force=True)
 
-                for mac, (seen_at, _) in list(hub._last_seen.items()):
-                    if now - seen_at > seen_ttl_s:
+                for mac, (seen_at, mode) in list(hub._last_seen.items()):
+                    if now - seen_at > _seen_ttl(mode):
                         hub._last_seen.pop(mac, None)
                         hub._logged.discard(mac)
+
+                if disconnected and not pending:
+                    hub._idle_scan_cycles += 1
+                    if hub._idle_scan_cycles >= _HUB_IDLE_RESTART_CYCLES:
+                        logger.warning(
+                            "hub idle with %d disconnected pad(s); restarting BLE scanner",
+                            len(disconnected),
+                        )
+                        hub._idle_scan_cycles = 0
+                        hub._last_seen.clear()
+                        hub._logged.clear()
+                        prepare_bluez_global()
+                        try:
+                            await hub._scanner.stop()
+                        except Exception:
+                            pass
+                        hub._scanner = BleakScanner(detection_callback=on_adv)
+                else:
+                    hub._idle_scan_cycles = 0
 
                 await asyncio.sleep(0.05 if connected_count else 0.025)
         finally:
@@ -355,17 +446,22 @@ class _ConnectHub:
         adapter = self.config.adapter_mac
         if not adapter:
             return False, "no adapter configured"
+        attempt_s = _CONNECT_ATTEMPT_S
+        dst_types = (
+            (worker.last_dst_type, att.LE_RANDOM if worker.last_dst_type == att.LE_PUBLIC else att.LE_PUBLIC)
+            if worker.last_dst_type is not None
+            else (att.LE_PUBLIC, att.LE_RANDOM)
+        )
         with _CONNECT_LOCK:
-            _force_le_scan_off()
             last_detail = "no attempts"
             for attempt in range(_CONNECT_ATTEMPTS):
-                if attempt and attempt % 4 == 0:
-                    _force_le_scan_off()
                 ctrl = SwitchController(mac, adapter)
-                for dst in (att.LE_PUBLIC, att.LE_RANDOM):
-                    ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
+                ctrl.GC_IMPACT_THRESHOLD = self.config.gc_impact_threshold
+                for dst in dst_types:
+                    ok, detail = self._connect_dst_with_polling(ctrl, dst, attempt_s)
                     if ok:
                         ctrl.att.dst_type = dst
+                        worker.last_dst_type = dst
                         if worker.activate(ctrl):
                             worker._ready.set()
                             return True, "ok"
@@ -374,7 +470,14 @@ class _ConnectHub:
                     last_detail = detail
                 ctrl.close()
                 time.sleep(0.02)
+            if worker.last_dst_type is not None:
+                worker.last_dst_type = None
             return False, last_detail
+
+    @staticmethod
+    def _connect_dst_with_polling(ctrl: SwitchController, dst: int, attempt_s: float) -> tuple[bool, str]:
+        _force_le_scan_off()
+        return ctrl.att._connect_once(dst, attempt_s)
 
 
 class _Worker:
@@ -403,6 +506,7 @@ class _Worker:
         self._disconnected = threading.Event()
         self._ready = threading.Event()
         self._led_player: Optional[int] = None
+        self.last_dst_type: Optional[int] = None
 
     def is_connected(self) -> bool:
         return self.controller is not None and self.controller.is_connected
@@ -567,10 +671,15 @@ class Bridge:
         self._reorder_lock = threading.Lock()
         self._state_lock = threading.Lock()
 
+    # Measured empty on a real NSO GameCube pad (~2939 mV before cutoff).
+    BATTERY_EMPTY_MV = 2950
+    BATTERY_FULL_MV = 4200
+
     def _battery_pct(self, mv: Optional[int]) -> Optional[int]:
         if not mv:
             return None
-        return max(0, min(100, int((mv - 3300) * 100 / 900)))
+        span = self.BATTERY_FULL_MV - self.BATTERY_EMPTY_MV
+        return max(0, min(100, int((mv - self.BATTERY_EMPTY_MV) * 100 / span)))
 
     def _publish_state(self) -> None:
         entries = self.config.entries()
@@ -592,6 +701,7 @@ class Bridge:
                         bonded=entry.bonded,
                         connected=worker.is_connected() if worker else False,
                         battery_pct=self._battery_pct(mv),
+                        battery_mv=mv,
                     )
                 )
             if self._stop.is_set():
@@ -676,9 +786,6 @@ class Bridge:
         if not self.dsu.start():
             self.dsu = None
 
-        self.hub.start()
-        self._publish_state()
-        threading.Thread(target=self._state_loop, name="ngc-state", daemon=True).start()
         logger.info("starting %d controller worker(s)", len(entries))
         for entry in entries:
             worker = _Worker(
@@ -690,7 +797,12 @@ class Bridge:
                 on_topology_change=self._schedule_reorder,
             )
             self.workers.append(worker)
+            self.hub.register(worker)
             threading.Thread(target=worker.run, name=f"ctrl-{entry.player}", daemon=True).start()
+
+        self.hub.start()
+        self._publish_state()
+        threading.Thread(target=self._state_loop, name="ngc-state", daemon=True).start()
 
         while not self._stop.is_set():
             self._stop.wait(0.5)
