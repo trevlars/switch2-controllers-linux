@@ -136,8 +136,9 @@ NGC_GC_AXES = (
 def fix_gamecube_mapping(mapping: str) -> str:
     """Build a complete gamecontrollerdb line for ngc GameCube uinput pads.
 
-    Matches ngc/gamepad.py button indices. Aligns with SDL's Switch 2 GameCube
-    layout: Z+R click=right bumper, ZL+L=left bumper, back=C (minus)."""
+    Matches ngc/gamepad.py button indices. ZL/Z are their own shoulder slots,
+    separate from the L/R trigger digital click (which stays off the SDL
+    button map since it's redundant with the lefttrigger/righttrigger axis)."""
     parts = mapping.split(",")
     if len(parts) < 2:
         return mapping
@@ -147,20 +148,19 @@ def fix_gamecube_mapping(mapping: str) -> str:
         if token.split(":", 1)[0] in _KEEP_HAT_KEYS
     ]
     axis_tokens = list(NGC_GC_AXES[:-1]) + hat_tokens + [NGC_GC_AXES[-1]]
-    # b0=A b1=B b2=X(NORTH) b3=Y(WEST) b4=Capture b5=L+ZL b6=R+Z b7=C b8=Start b9=Home
+    # b0=A b1=B b2=X(NORTH) b3=Y(WEST) b4=Capture b5=L(click) b6=R(click)
+    # b7=ZL b8=Z(ZR) b9=C b10=Start b11=Home (no stick clicks; GC sticks don't click)
     buttons = [
         "a:b0",
         "b:b1",
         "x:b2",
         "y:b3",
-        "back:b7",
-        "start:b8",
-        "guide:b9",
+        "back:b9",
+        "start:b10",
+        "guide:b11",
         "misc2:b4",
-        "leftshoulder:b5",
-        "rightshoulder:b6",
-        "leftstick:b10",
-        "rightstick:b11",
+        "leftshoulder:b7",
+        "rightshoulder:b8",
         "hint:SDL_GAMECONTROLLER_USE_GAMECUBE_LABELS:=1",
     ]
     return ",".join([guid, name, *buttons, *axis_tokens])
