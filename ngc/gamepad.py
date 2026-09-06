@@ -32,9 +32,11 @@ TRIGGER_MIN, TRIGGER_MAX = 0, 255
 #                                                                             #
 # BLE input uses the unified Switch 2 bitmask in protocol.SWITCH_BUTTONS      #
 # (Nadeflore/switch2-controllers, bitaxislabs). On the NSO GameCube pad the   #
-# ZR bit (0x80) is physical Z; R bit (0x40) is R trigger full-click. For Steam /
-# Switch-style layouts, ZL+ L -> BTN_TL (left bumper) and Z+ R click -> BTN_TR
-# (right bumper). C -> BTN_SELECT (minus). Analog L/R stay on trigger axes.      #
+# ZR bit (0x80) is physical Z; R bit (0x40) is R trigger full-click. ZL/ZR    #
+# (the physical shoulder buttons) get their own evdev codes (BTN_TL2/BTN_TR2)#
+# distinct from L/R (the analog trigger's digital full-click, BTN_TL/BTN_TR),#
+# matching the Pro controller's L vs ZL split. C -> BTN_SELECT (minus).      #
+# Analog L/R stay on trigger axes regardless.                                #
 #                                                                             #
 # Face buttons use semantic evdev positions (A=SOUTH, B=EAST, X=WEST, Y=NORTH).
 # BTN_C (306) sits between B and the face cluster, so SDL's auto gamecontrollerdb
@@ -63,23 +65,22 @@ PRO_BUTTON_MAP = {
     "R_STK": e.BTN_THUMBR,
 }
 
-# ZL/Z and L/R click share shoulder slots so Steam and emulators see standard bumpers.
+# ZL/ZR get their own shoulder slots, separate from L/R trigger click.
 GAMECUBE_BUTTON_MAP = {
     "A": e.BTN_SOUTH,
     "B": e.BTN_EAST,
     # NSO GC face layout: X is left (north on diamond), Y is top (west on diamond).
     "X": e.BTN_NORTH,
     "Y": e.BTN_WEST,
-    "L": e.BTN_TL,
-    "R": e.BTN_TR,
-    "ZL": e.BTN_TL,       # left bumper (with L click)
-    "ZR": e.BTN_TR,       # right bumper / physical Z (with R click)
+    "L": e.BTN_TL,         # L trigger digital full-click
+    "R": e.BTN_TR,         # R trigger digital full-click
+    "ZL": e.BTN_TL2,       # physical ZL shoulder button
+    "ZR": e.BTN_TR2,       # physical Z button
     "PLUS": e.BTN_START,   # GC Start; BLE PLUS bit (not MINUS)
     "HOME": e.BTN_MODE,    # GC Nintendo/Home
     "CAPTURE": e.BTN_Z,    # screenshot; b4 -> misc2 in gamecontrollerdb
     "C": e.BTN_SELECT,     # minus / back (GC has no Select; C fills that slot)
-    "L_STK": e.BTN_THUMBL,
-    "R_STK": e.BTN_THUMBR,
+    # No L_STK/R_STK: the NSO GameCube pad's sticks don't click.
 }
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
