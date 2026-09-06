@@ -71,6 +71,8 @@ class SwitchController:
         self.input_callback: Optional[InputCallback] = None
         self.disconnect_callback: Optional[Callable[[], None]] = None
         self.last_input_at: float = 0.0
+        self.last_button_at: float = 0.0
+        self._last_buttons: int = 0
 
         self.att.notification_cb = self._on_notification
         self.att.disconnect_cb = self._on_disconnect
@@ -179,7 +181,10 @@ class SwitchController:
             self._start_hd_worker()
 
         self._retry("input notifications", lambda: self.att.subscribe(self.h_input_cccd, True))
-        self.last_input_at = time.monotonic()
+        now = time.monotonic()
+        self.last_input_at = now
+        self.last_button_at = now
+        self._last_buttons = 0
         logger.info("input notifications enabled")
 
     def _retry(self, label: str, fn, attempts: int = 3, delay: float = 0.1):
@@ -201,7 +206,11 @@ class SwitchController:
         if handle == self.h_input:
             report = P.InputReport.parse(data)
             self.battery_mv = report.battery_mv
-            self.last_input_at = time.monotonic()
+            now = time.monotonic()
+            self.last_input_at = now
+            if report.buttons != self._last_buttons:
+                self._last_buttons = report.buttons
+                self.last_button_at = now
             if self.input_callback is not None:
                 self.input_callback(self, report)
         elif handle == self.h_cmd_resp:
@@ -280,6 +289,24 @@ class SwitchController:
         player = min(max(player, 1), 8)
         value = P.LED_PATTERN[player]
         self.write_command(P.COMMAND_LEDS, P.SUBCOMMAND_LEDS_SET_PLAYER, value.to_bytes().ljust(4, b"\x00"))
+
+    def sleep(self) -> None:
+        """Put the controller into sleep/page-scan mode after host idle timeout."""
+        if not self.is_connected:
+            return
+        payload = bytes([P.HCI_STATE_SLEEP]).ljust(4, b"\x00")
+        try:
+            self.write_command(
+                P.COMMAND_HOST,
+                P.SUBCOMMAND_HOST_HCI_STATE,
+                payload,
+                timeout=1.0,
+            )
+            logger.info("controller %s entering sleep", self.mac)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sleep command failed for %s (%s); dropping link", self.mac, exc)
+        finally:
+            self.close()
 
     def play_vibration_preset(self, preset_id: int) -> None:
         self.write_command(P.COMMAND_VIBRATION, P.SUBCOMMAND_VIBRATION_PLAY_PRESET, preset_id.to_bytes().ljust(4, b"\x00"))

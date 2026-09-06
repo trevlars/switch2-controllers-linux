@@ -44,6 +44,22 @@ if [[ -x "$PROJECT_DIR/scripts/disable-steam-bluetooth.py" ]]; then
   python3 "$PROJECT_DIR/scripts/disable-steam-bluetooth.py" || true
 fi
 
+if [[ -x "$PROJECT_DIR/scripts/install-emulator-integration.sh" ]]; then
+  bash "$PROJECT_DIR/scripts/install-emulator-integration.sh" || true
+fi
+
+echo ">> installing bridge watchdog + BT helpers..."
+mkdir -p "$HOME/.local/bin"
+install -m 0755 system/bluetooth-always-on.sh "$HOME/.local/bin/bluetooth-always-on.sh"
+install -m 0755 system/bazzite-nso-gc-watchdog.sh "$HOME/.local/bin/bazzite-nso-gc-watchdog.sh"
+install -m 0755 system/bazzite-reorder-on-nso-connect.sh "$HOME/.local/bin/bazzite-reorder-on-nso-connect.sh"
+install -m 0755 system/nso-gc-after-gamescope.sh "$HOME/.local/bin/nso-gc-after-gamescope.sh"
+cp systemd/nso-gc-watchdog.service "$HOME/.config/systemd/user/nso-gc-watchdog.service"
+cp systemd/nso-gc-watchdog.timer "$HOME/.config/systemd/user/nso-gc-watchdog.timer"
+cp systemd/nso-gc-after-gamescope.service "$HOME/.config/systemd/user/nso-gc-after-gamescope.service"
+systemctl --user daemon-reload
+systemctl --user enable --now nso-gc-watchdog.timer 2>/dev/null || true
+
 cat <<EOF
 
 Installed. Open **Switch 2 Controllers** from the app menu or Decky in Game Mode.
