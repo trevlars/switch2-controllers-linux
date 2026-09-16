@@ -139,6 +139,16 @@ class SwitchGamepad:
         self._ff_thread = threading.Thread(target=self._ff_loop, daemon=True)
         self._ff_thread.start()
 
+        # rumble_cb may block for up to ~2s on the GameCube pad (it waits on a
+        # BLE command ack and can queue behind LED/calibration writes sharing
+        # the controller's command lock). Dispatch it from a separate thread
+        # so a slow write never stalls the uinput FF event pump above.
+        self._rumble_lock = threading.Lock()
+        self._rumble_pending: Optional[tuple[float, float]] = None
+        self._rumble_event = threading.Event()
+        self._rumble_thread = threading.Thread(target=self._rumble_loop, daemon=True)
+        self._rumble_thread.start()
+
     @staticmethod
     def _scale_stick(value: float) -> int:
         v = int(value * STICK_MAX)
@@ -215,6 +225,29 @@ class SwitchGamepad:
         if changed:
             self.ui.syn()
 
+    def _queue_rumble(self, strong: float, weak: float) -> None:
+        with self._rumble_lock:
+            self._rumble_pending = (strong, weak)
+        self._rumble_event.set()
+
+    def _rumble_loop(self) -> None:
+        while self._ff_running:
+            if not self._rumble_event.wait(timeout=0.5):
+                continue
+            with self._rumble_lock:
+                pending = self._rumble_pending
+                self._rumble_pending = None
+                self._rumble_event.clear()
+            if pending is None or not self._ff_running:
+                continue
+            cb = self.rumble_cb
+            if cb is None:
+                continue
+            try:
+                cb(*pending)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _ff_loop(self) -> None:
         try:
             for event in self.ui.read_loop():
@@ -245,13 +278,14 @@ class SwitchGamepad:
             if self.rumble_cb is None:
                 return
             if value == 0:
-                self.rumble_cb(0.0, 0.0)
+                self._queue_rumble(0.0, 0.0)
             else:
                 strong, weak = self._effects.get(code, (0, 0))
-                self.rumble_cb(strong / 65535.0, weak / 65535.0)
+                self._queue_rumble(strong / 65535.0, weak / 65535.0)
 
     def close(self) -> None:
         self._ff_running = False
+        self._rumble_event.set()
         if self.rumble_cb is not None:
             try:
                 self.rumble_cb(0.0, 0.0)
