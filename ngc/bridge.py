@@ -30,6 +30,7 @@ from .config import CONFIG_DIR, Config, ControllerEntry
 from .device import SwitchController
 from .dsu import DSUServer
 from .gamepad import SwitchGamepad
+from .joycon_pair import JoyConModeManager
 from .motion_evdev import MotionEvdev
 from .status import BridgeState, ControllerState, clear_state, write_state
 
@@ -379,6 +380,8 @@ class _ConnectHub:
                     key=lambda mac: hub._last_seen[mac][0],
                     reverse=True,
                 )
+                if hub.bridge is not None:
+                    pending = hub.bridge.joycons.filter_pending(hub, pending)
                 if pending:
                     # Clear Steam's LE scan and drop BlueZ Device ghosts before dialing.
                     prepare_bluez_global()
@@ -518,7 +521,10 @@ class _Worker:
 
     def _on_input(self, ctrl: SwitchController, report: P.InputReport) -> None:
         (lx, ly), (rx, ry), lt, rt = ctrl.calibrated_input(report)
-        if self.gamepad is not None:
+        handled = self.hub.bridge is not None and self.hub.bridge.joycons.route_input(
+            self, ctrl, report, (lx, ly, rx, ry, lt, rt)
+        )
+        if not handled and self.gamepad is not None:
             self.gamepad.update(report.buttons, (lx, ly), (rx, ry), lt, rt)
         if self.motion is not None:
             self.motion.update(report)
@@ -542,6 +548,8 @@ class _Worker:
 
     def _ensure_gamepad(self, ctrl: SwitchController) -> None:
         pid = ctrl.product_id
+        if self.hub.bridge is not None and self.hub.bridge.joycons.ensure_pair_output(self, ctrl):
+            return
         if self.gamepad is not None and self._gamepad_product == pid:
             return
         if self.gamepad is not None:
@@ -567,8 +575,9 @@ class _Worker:
         from .gamepad import button_map_for_product
         from evdev import ecodes as e
 
+        joycon_map = self.hub.bridge.joycons.button_map(product_id) if self.hub.bridge else None
         if not self.config.button_map:
-            return button_map_for_product(product_id)
+            return joycon_map or button_map_for_product(product_id)
         resolved = {}
         for switch_name, code in self.config.button_map.items():
             resolved[switch_name] = getattr(e, code) if isinstance(code, str) else code
@@ -591,9 +600,9 @@ class _Worker:
                 self.entry.bonded = True
                 logger.info("bonded %s to %s", mac, self.config.adapter_mac)
             self.controller = ctrl
-            self._ensure_gamepad(ctrl)
-            if self.gamepad is not None and self.config.enable_rumble:
-                self.gamepad.rumble_cb = self._on_rumble
+            with self.hub.bridge.joycons.activation_context():
+                self._ensure_gamepad(ctrl)
+                self.hub.bridge.joycons.bind_individual_rumble(self)
             if self.dsu is not None:
                 self.dsu.set_slot(self.slot, True, mac=mac, battery_mv=ctrl.battery_mv or 0)
             if self.on_topology_change is not None:
@@ -612,28 +621,31 @@ class _Worker:
                 ctrl.close()
             except Exception:  # noqa: BLE001
                 pass
-        if self.gamepad is not None:
-            self.gamepad.rumble_cb = None
-            self.gamepad.close()
-            self.gamepad = None
-            self._gamepad_product = None
-        if self.motion is not None:
-            self.motion.close()
-            self.motion = None
-
-    def _teardown_session(self, *, full: bool = False) -> None:
-        if self.gamepad is not None:
-            self.gamepad.rumble_cb = None
-            if full:
+        with self.hub.bridge.joycons.activation_context():
+            if self.gamepad is not None:
+                self.gamepad.rumble_cb = None
                 self.gamepad.close()
                 self.gamepad = None
                 self._gamepad_product = None
-            else:
-                self.gamepad.release_all()
-        if self.motion is not None:
-            if full:
+            if self.motion is not None:
                 self.motion.close()
                 self.motion = None
+
+    def _teardown_session(self, *, full: bool = False) -> None:
+        with self.hub.bridge.joycons.activation_context():
+            self.hub.bridge.joycons.disconnect(self)
+            if self.gamepad is not None:
+                self.gamepad.rumble_cb = None
+                if full:
+                    self.gamepad.close()
+                    self.gamepad = None
+                    self._gamepad_product = None
+                else:
+                    self.hub.bridge.joycons.release_individual(self.gamepad)
+            if self.motion is not None:
+                if full:
+                    self.motion.close()
+                    self.motion = None
         if self.dsu is not None:
             self.dsu.set_slot(self.slot, False)
         if self.controller:
@@ -696,6 +708,7 @@ class Bridge:
         self.workers: list[_Worker] = []
         self.dsu: Optional[DSUServer] = None
         self.hub = _ConnectHub(config, self._stop, bridge=self)
+        self.joycons = JoyConModeManager(self)
         self._reorder_timer: Optional[threading.Timer] = None
         self._reorder_lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -790,6 +803,7 @@ class Bridge:
         while not self._stop.wait(_STATUS_INTERVAL_S):
             try:
                 self._apply_led_overrides()
+                self.joycons.tick()
                 self._publish_state()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("state publish failed: %s", exc)
@@ -841,6 +855,7 @@ class Bridge:
                 self._reorder_timer.cancel()
         for worker in self.workers:
             worker.cleanup()
+        self.joycons.close()
         if self.dsu is not None:
             self.dsu.stop()
         if self.hub._executor is not None:

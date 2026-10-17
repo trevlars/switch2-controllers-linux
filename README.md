@@ -4,7 +4,8 @@ Wireless **Nintendo Switch 2** controller support for Linux. The **NSO GameCube
 controller** and **Pro Controller 2** are tested and working — buttons, analog
 sticks/triggers, **rumble**, **gyro/accelerometer** (via a built-in DSU/cemuhook
 server), battery reporting, and reliable wake-from-sleep reconnection.
-**Joy-Con 2** has experimental, **untested** scaffolding (see the table below).
+**Joy-Con 2** is hardware-tested with paired and sideways single-controller
+output modes; GL/GR over Bluetooth remains an unresolved limitation (see below).
 
 The Switch 2 controllers use a proprietary Bluetooth LE (GATT) protocol that
 standard Linux gamepad stacks don't understand. This project talks to them
@@ -24,8 +25,8 @@ fully in user space — no kernel modules, no root.
   controllers; press any button to wake and the bridge connects. This replaces
   the earlier blind retry loop, but **still needs real-world confirmation** on
   your box — especially with two pads waking at once.
-- **Rumble**: HD rumble for Pro Controller 2 (real motor packets; Joy-Con 2
-  paths exist but are untested); preset-based, edge-driven rumble for the NSO
+- **Rumble**: HD rumble for Pro Controller 2 and Joy-Con 2 (real motor
+  packets); preset-based, edge-driven rumble for the NSO
   GameCube pad (no HD actuator).
 - **Gyro everywhere**: an embedded **DSU (cemuhook) UDP server** on
   `127.0.0.1:26760` feeds accel/gyro to Dolphin, Cemu, Ryujinx, etc.
@@ -41,14 +42,16 @@ fully in user space — no kernel modules, no root.
 | --------------------- | ------------- | ------- | ------ | ------------- | ------------ | ---- |
 | NSO GameCube          | ✅ tested      | ✅      | ✅     | ✅ analog L/R | ✅ presets   | ✅   |
 | Pro Controller 2      | ✅ tested      | ✅      | ✅     | digital ZL/ZR | ✅ HD rumble | ✅   |
-| Joy-Con 2 (L / R)     | ⚠️ untested   | ?       | ?      | ?             | ?            | ?    |
+| Joy-Con 2 (L / R)     | ⚠️ tested, limitation | ✅ except GL/GR | ✅ | digital ZL/ZR | ✅ HD rumble | ? |
 
-> **Joy-Con 2 is untested.** The code defines their product IDs, accepts them in
-> the scanner, and has per-side vibration UUIDs, so they may connect — but this
-> has never been verified against real hardware. A single Joy-Con also needs its
-> own button/stick mapping and sideways orientation handling, which isn't
-> implemented yet (it currently reuses the full-controller layout). Treat
-> Joy-Con 2 as a starting point, not a working feature. Reports/PRs welcome.
+> **Joy-Con 2 limitation:** standard controls are hardware-tested over BLE in
+> paired and sideways single-controller modes. GL and GR are present as distinct
+> inputs over USB through the charging grip, but they did not appear in BLE input
+> reports during testing, even though their masks are known (`GR=0x01000000`,
+> `GL=0x02000000`). This patch intentionally does not claim or expose working
+> GL/GR-over-Bluetooth support. A passive grip has no electrical connection and
+> cannot be detected; automatic mode detection applies only to the powered GL/GR
+> charging grip.
 
 ## How it works
 
@@ -118,6 +121,27 @@ The wizard bonds the controller so it can reconnect without pairing mode again.
 
 Use **Switch 2 Controller Status** from the app menu to see what's paired and
 whether the service is active.
+
+### Joy-Con 2 output modes
+
+The Joy-Con mode manager is opt-in and intended for one configured left/right
+pair:
+
+```bash
+# Always expose both halves as one combined virtual controller.
+NGC_MERGE_JOYCONS=1 python -m ngc run
+
+# Switch automatically: combined while both halves report the powered charging
+# grip signature, otherwise expose two sideways single-controller gamepads.
+NGC_AUTO_JOYCON_MODE=1 python -m ngc run
+
+# Require both configured halves to be awake before connecting either one.
+NGC_REQUIRE_JOYCON_PAIR=1 python -m ngc run
+```
+
+`NGC_AUTO_JOYCON_MODE=1` also enables paired wake coordination. Environment
+variables may be added to the user service override when the bridge is run by
+systemd.
 
 > **Honest status:** pairing, input, rumble, and gyro are tested on real
 > hardware (NSO GameCube + Pro Controller 2). Routine wake-connect *should* work

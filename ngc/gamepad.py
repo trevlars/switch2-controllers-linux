@@ -165,6 +165,8 @@ class SwitchGamepad:
         right_stick: tuple[float, float],
         left_trigger: int,
         right_trigger: int,
+        *,
+        emit_dpad: bool = True,
     ) -> None:
         changed = False
 
@@ -184,8 +186,8 @@ class SwitchGamepad:
         dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
             1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
         )
-        changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
-        changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
+        changed |= self._emit_abs(e.ABS_HAT0X, dpad_x if emit_dpad else 0)
+        changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y if emit_dpad else 0)
 
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(left_stick[0]))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(left_stick[1]))
