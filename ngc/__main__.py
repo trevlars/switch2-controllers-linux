@@ -15,7 +15,7 @@ import sys
 import time
 
 from . import protocol as P
-from .config import Config
+from .config import ASSIGNABLE_BUTTONS, Config
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -129,6 +129,30 @@ def _list(cfg: Config) -> int:
     return 0
 
 
+def _grip(cfg: Config, mac: str | None, gl: str | None, gr: str | None) -> int:
+    entries = cfg.entries()
+    if not mac:
+        if len(entries) != 1:
+            print("Usage: ngc grip --mac AA:BB:CC:DD:EE:FF [--gl BUTTON] [--gr BUTTON]")
+            return 1
+        mac = entries[0].mac
+    if not any(e.mac.upper() == mac.upper() for e in entries):
+        print(f"Controller {mac} is not in your saved list.")
+        return 1
+    try:
+        for grip, value in (("GL", gl), ("GR", gr)):
+            if value is not None:
+                cfg.set_grip(mac, grip, None if value.lower() == "none" else value)
+    except ValueError as exc:
+        print(f"{exc}. Valid buttons: {', '.join(ASSIGNABLE_BUTTONS)}")
+        return 1
+    if gl is not None or gr is not None:
+        cfg.save()
+    gm = cfg.grip_map_for(mac)
+    print(f"{mac}: GL -> {gm.get('GL', 'unassigned')}, GR -> {gm.get('GR', 'unassigned')}")
+    return 0
+
+
 def _remove(cfg: Config, mac: str) -> int:
     if not cfg.remove_controller(mac):
         print(f"Controller {mac} is not in your saved list.")
@@ -178,11 +202,13 @@ def _run(cfg: Config) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="ngc", description="Switch 2 controller bridge (GameCube / Pro Controller 2 / Joy-Con 2)")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "pair", "rebond", "list", "remove", "swap"])
+                        choices=["run", "pair", "rebond", "list", "remove", "swap", "grip"])
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0, help="pairing scan timeout")
     parser.add_argument("--mac", help="controller MAC (for remove)")
     parser.add_argument("--player", type=int, help="player slot 1-8 (for pair)")
+    parser.add_argument("--gl", metavar="BUTTON", help="button for GL (grip); 'none' clears (for grip)")
+    parser.add_argument("--gr", metavar="BUTTON", help="button for GR (grip); 'none' clears (for grip)")
     parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots to swap")
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
@@ -204,6 +230,9 @@ def main(argv=None) -> int:
     if args.command == "swap":
         a, b = (args.players if args.players else (1, 2))
         return _swap(cfg, a, b)
+
+    if args.command == "grip":
+        return _grip(cfg, args.mac, args.gl, args.gr)
 
     if args.command == "list":
         return _list(cfg)

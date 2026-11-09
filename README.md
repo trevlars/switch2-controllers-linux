@@ -37,11 +37,11 @@ fully in user space — no kernel modules, no root.
 
 ## Supported controllers
 
-| Controller            | Status        | Buttons | Sticks | Triggers      | Rumble       | Gyro |
-| --------------------- | ------------- | ------- | ------ | ------------- | ------------ | ---- |
-| NSO GameCube          | ✅ tested      | ✅      | ✅     | ✅ analog L/R | ✅ presets   | ✅   |
-| Pro Controller 2      | ✅ tested      | ✅      | ✅     | digital ZL/ZR | ✅ HD rumble | ✅   |
-| Joy-Con 2 (L / R)     | ⚠️ untested   | ?       | ?      | ?             | ?            | ?    |
+| Controller | Status | Buttons | Sticks | Triggers | Rumble | Gyro |
+| --- | --- | --- | --- | --- | --- | --- |
+| NSO GameCube | ✅ tested | ✅ | ✅ | ✅ analog L/R | ✅ presets | ✅ |
+| Pro Controller 2 | ✅ tested | ✅ | ✅ | digital ZL/ZR | ✅ HD rumble | ✅ |
+| Joy-Con 2 (L / R) | ⚠️ untested | ? | ? | ? | ? | ? |
 
 > **Joy-Con 2 is untested.** The code defines their product IDs, accepts them in
 > the scanner, and has per-side vibration UUIDs, so they may connect — but this
@@ -132,6 +132,16 @@ python -m ngc list          # show paired controllers
 python -m ngc run           # foreground bridge (service uses this)
 journalctl --user -u nso-gc.service -f   # live logs
 ```
+
+## Mapping GL / GR (Pro Controller 2 only)
+
+Assign any button to the back grips, per controller (saved in `~/.config/nso-gc/config.json`
+and re-applied on every reconnect):
+
+Each controller row shows its GL/GR icons and the assigned button.
+Click one, then press the button on that (connected) controller to assign it; "Clear" removes it.
+
+Button icons in `scripts/icons/` are from  [Zacksly](https://zacksly.itch.io/switch-2-button-icons-and-controls) and are licensed under CC BY 3.0 (see `scripts/icons/LICENSE.txt`).
 
 ## Gyro / motion (DSU)
 

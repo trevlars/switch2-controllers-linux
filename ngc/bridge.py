@@ -25,6 +25,7 @@ from bleak import BleakScanner
 from bleak.exc import BleakDBusError
 
 from . import att
+from . import grip_capture
 from . import protocol as P
 from .config import CONFIG_DIR, Config, ControllerEntry
 from .device import SwitchController
@@ -507,6 +508,9 @@ class _Worker:
         self._ready = threading.Event()
         self._led_player: Optional[int] = None
         self.last_dst_type: Optional[int] = None
+        self._capture_check_at = 0.0
+        self._capture_grip_name: Optional[str] = None
+        self._capture_armed = False
 
     def is_connected(self) -> bool:
         return self.controller is not None and self.controller.is_connected
@@ -518,14 +522,52 @@ class _Worker:
 
     def _on_input(self, ctrl: SwitchController, report: P.InputReport) -> None:
         (lx, ly), (rx, ry), lt, rt = ctrl.calibrated_input(report)
+        buttons = report.buttons
+        if self._capture_grip(buttons):
+            buttons = 0
         if self.gamepad is not None:
-            self.gamepad.update(report.buttons, (lx, ly), (rx, ry), lt, rt)
+            self.gamepad.update(buttons, (lx, ly), (rx, ry), lt, rt)
         if self.motion is not None:
             self.motion.update(report)
         if self.dsu is not None:
             sticks = (_stick_to_dsu(lx), _stick_to_dsu(ly),
                       _stick_to_dsu(rx), _stick_to_dsu(ry))
             self.dsu.update(self.slot, report, sticks, (lt, rt))
+
+    def _capture_grip(self, buttons: int) -> bool:
+        """Handle a GUI request to learn a grip assignment; True while capturing."""
+        now = time.monotonic()
+        if now >= self._capture_check_at:
+            self._capture_check_at = now + 0.2
+            req = grip_capture.pending_for(self.entry.mac)
+            if req and req.get("clear"):
+                grip = req["grip"]
+                self.config.set_grip(self.entry.mac, grip, None)
+                self.config.save()
+                if self.gamepad is not None:
+                    self.gamepad.grip_map = self.config.grip_map_for(self.entry.mac)
+                grip_capture.finish(self.entry.mac, grip, None)
+                req = None
+            grip = req["grip"] if req else None
+            if grip != self._capture_grip_name:
+                self._capture_grip_name = grip
+                # Require a release first so the click that opened the dialog is ignored.
+                self._capture_armed = False
+        if not self._capture_grip_name:
+            return False
+        if not self._capture_armed:
+            self._capture_armed = buttons == 0
+            return True
+        pressed = grip_capture.first_pressed(buttons)
+        if pressed:
+            grip = self._capture_grip_name
+            self.config.set_grip(self.entry.mac, grip, pressed)
+            self.config.save()
+            if self.gamepad is not None:
+                self.gamepad.grip_map = self.config.grip_map_for(self.entry.mac)
+            grip_capture.finish(self.entry.mac, grip, pressed)
+            self._capture_grip_name = None
+        return True
 
     def _on_disconnect(self) -> None:
         logger.warning("controller %s disconnected", self.entry.mac)
@@ -542,6 +584,8 @@ class _Worker:
 
     def _ensure_gamepad(self, ctrl: SwitchController) -> None:
         pid = ctrl.product_id
+        if self.config.set_product(self.entry.mac, pid):
+            self.config.save()
         if self.gamepad is not None and self._gamepad_product == pid:
             return
         if self.gamepad is not None:
@@ -558,6 +602,7 @@ class _Worker:
             button_map=self.config_button_map(pid),
             product=pid,
             mac=self.entry.mac,
+            grip_map=self.config.grip_map_for(self.entry.mac),
         )
         self.motion = MotionEvdev(name, self.entry.mac, product=pid)
         self._gamepad_product = pid
@@ -574,6 +619,17 @@ class _Worker:
             resolved[switch_name] = getattr(e, code) if isinstance(code, str) else code
         return resolved
 
+    def _refresh_grip_map(self) -> None:
+        """Re-read the saved GL/GR assignment so edits apply on reconnect."""
+        try:
+            from .config import Config
+            grips = Config.load().grip_map_for(self.entry.mac)
+        except Exception:  # noqa: BLE001
+            return
+        self.config.set_grips(self.entry.mac, grips)
+        if self.gamepad is not None:
+            self.gamepad.grip_map = grips
+
     def activate(self, ctrl: SwitchController) -> bool:
         mac = self.entry.mac
         try:
@@ -581,6 +637,7 @@ class _Worker:
             ctrl.input_callback = self._on_input
             ctrl.disconnect_callback = self._on_disconnect
             self._disconnected.clear()
+            self._refresh_grip_map()
             player = self.effective_player()
             ctrl.initialize(player=player)
             self._led_player = player

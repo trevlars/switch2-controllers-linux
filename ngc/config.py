@@ -60,12 +60,21 @@ def detect_adapter() -> Optional[str]:
     return None
 
 
+PRO_CONTROLLER2_PID = 0x2069
+GRIP_BUTTONS = ("GL", "GR")
+ASSIGNABLE_BUTTONS = (
+    "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "HOME", "CAPTURE",
+    "C", "L_STK", "R_STK", "UP", "DOWN", "LEFT", "RIGHT",
+)
+
+
 @dataclass
 class ControllerEntry:
     mac: str
     player: int = 1
     name: str = ""
     bonded: bool = False
+    grip_map: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -128,9 +137,64 @@ class Config:
                 player=c.get("player", i + 1),
                 name=c.get("name", ""),
                 bonded=bool(c.get("bonded", False)),
+                grip_map=self.grip_map_for(c["mac"]),
             )
             for i, c in enumerate(self.controllers)
         ]
+
+    def set_product(self, mac: str, product_id: int) -> bool:
+        """Remember a controller's USB product ID; True if it changed."""
+        for c in self.controllers:
+            if c["mac"].upper() == mac.upper() and c.get("product_id") != product_id:
+                c["product_id"] = product_id
+                return True
+        return False
+
+    def supports_grips(self, mac: str) -> bool:
+        """Only the Pro Controller 2 has GL/GR (unknown models are allowed until seen)."""
+        for c in self.controllers:
+            if c["mac"].upper() == mac.upper():
+                pid = c.get("product_id")
+                return pid is None or pid == PRO_CONTROLLER2_PID
+        return False
+
+    def grip_map_for(self, mac: str) -> dict:
+        """Per-controller GL/GR assignment, e.g. {"GL": "A", "GR": "ZL"}."""
+        if not self.supports_grips(mac):
+            return {}
+        for c in self.controllers:
+            if c["mac"].upper() == mac.upper():
+                gm = c.get("grip_map") or {}
+                return {k: v for k, v in gm.items() if k in GRIP_BUTTONS and v in ASSIGNABLE_BUTTONS}
+        return {}
+
+    def set_grip(self, mac: str, grip: str, target: Optional[str]) -> bool:
+        """Assign (or clear with None) a button for GL/GR on one controller."""
+        grip = grip.upper()
+        if grip not in GRIP_BUTTONS:
+            raise ValueError(f"grip must be one of {GRIP_BUTTONS}")
+        if target is not None:
+            target = target.upper()
+            if target not in ASSIGNABLE_BUTTONS:
+                raise ValueError(f"unknown button {target!r}")
+        if not self.supports_grips(mac):
+            raise ValueError("only the Pro Controller 2 has GL/GR buttons")
+        for c in self.controllers:
+            if c["mac"].upper() == mac.upper():
+                gm = dict(c.get("grip_map") or {})
+                if target is None:
+                    gm.pop(grip, None)
+                else:
+                    gm[grip] = target
+                c["grip_map"] = gm
+                return True
+        return False
+
+    def set_grips(self, mac: str, grips: dict) -> None:
+        for c in self.controllers:
+            if c["mac"].upper() == mac.upper():
+                c["grip_map"] = dict(grips)
+                return
 
     def mark_bonded(self, mac: str, bonded: bool = True) -> None:
         for c in self.controllers:
