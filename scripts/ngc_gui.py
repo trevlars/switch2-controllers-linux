@@ -17,7 +17,7 @@ try:
     import gi
 
     gi.require_version("Gtk", "3.0")
-    from gi.repository import GLib, Gtk
+    from gi.repository import GdkPixbuf, GLib, Gtk
 except ImportError as exc:
     print(f"GTK unavailable: {exc}", file=sys.stderr)
     sys.exit(2)
@@ -27,6 +27,11 @@ PY = Path(os.environ.get("NGC_PYTHON", PROJECT_DIR / ".venv312" / "bin" / "pytho
 SERVICE = "nso-gc.service"
 STATE_PATH = Path.home() / ".config" / "nso-gc" / "state.json"
 STATE_STALE_S = 8.0
+CONFIG_PATH = Path.home() / ".config" / "nso-gc" / "config.json"
+ICON_DIR = Path(__file__).resolve().parent / "icons"
+GRIPS = ("GL", "GR")
+PRO_CONTROLLER2_PID = 0x2069
+BUTTON_LABELS = {"C": "C", "L_STK": "L3", "R_STK": "R3"}
 
 CSS = b"""
 window {
@@ -353,6 +358,26 @@ def build_status() -> AppStatus:
     )
 
 
+def load_grip_info(mac: str) -> tuple[bool, dict]:
+    """Return (controller has GL/GR, assigned grip map) from the saved config."""
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+    except Exception:
+        return False, {}
+    for c in data.get("controllers") or []:
+        if c.get("mac", "").upper() == mac.upper():
+            return c.get("product_id") == PRO_CONTROLLER2_PID, dict(c.get("grip_map") or {})
+    return False, {}
+
+
+def button_icon(name: str, size: int = 28) -> Gtk.Widget:
+    path = ICON_DIR / f"{name}.png"
+    if path.is_file():
+        pix = GdkPixbuf.Pixbuf.new_from_file_at_size(str(path), size, size)
+        return Gtk.Image.new_from_pixbuf(pix)
+    return Gtk.Label(label=BUTTON_LABELS.get(name, name))
+
+
 def run_ngc_cmd(args: list[str], timeout: float = 120.0) -> tuple[int, str]:
     _run(["systemctl", "--user", "stop", SERVICE], timeout=10)
     r = _run([str(PY), "-m", "ngc", *args], timeout=timeout, cwd=str(PROJECT_DIR))
@@ -588,12 +613,71 @@ class MainWindow(Gtk.ApplicationWindow):
         info.pack_start(status, False, False, 0)
         row.pack_start(info, True, True, 0)
 
+        has_grips, grip_map = load_grip_info(pad.mac)
+        if has_grips:
+            for grip in GRIPS:
+                row.pack_start(self._build_grip_button(pad, grip, grip_map), False, False, 0)
+
         gear = Gtk.MenuButton()
         gear.set_relief(Gtk.ReliefStyle.NONE)
         gear.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
         gear.set_popup(self._make_pad_menu(pad))
         row.pack_end(gear, False, False, 0)
         return row
+
+    def _build_grip_button(self, pad: PadStatus, grip: str, grip_map: dict) -> Gtk.Widget:
+        target = grip_map.get(grip)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(button_icon(grip), False, False, 0)
+        box.pack_start(Gtk.Label(label="→"), False, False, 0)
+        if target:
+            box.pack_start(button_icon(target), False, False, 0)
+        else:
+            box.pack_start(Gtk.Label(label="none"), False, False, 0)
+        btn = Gtk.Button()
+        btn.add(box)
+        btn.set_relief(Gtk.ReliefStyle.NONE)
+        btn.set_tooltip_text(f"Click to choose what {grip} does on this controller")
+        btn.connect("clicked", lambda _b: self.on_assign_grip(pad, grip))
+        return btn
+
+    def on_assign_grip(self, pad: PadStatus, grip: str) -> None:
+        if not pad.connected:
+            self._info("Controller not connected",
+                       "Connect this controller first, then pick a button for the grip.")
+            return
+        sys.path.insert(0, str(PROJECT_DIR))
+        from ngc import grip_capture
+        grip_capture.request(pad.mac, grip)
+
+        dlg = Gtk.Dialog(title=f"Assign {grip}", transient_for=self, modal=True)
+        dlg.add_button("Clear", 1)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(18)
+        box.pack_start(button_icon(grip, 64), False, False, 0)
+        box.pack_start(Gtk.Label(label=f"Press the button on P{pad.player} to use for {grip}…"),
+                       False, False, 0)
+        dlg.show_all()
+
+        def poll() -> bool:
+            if grip_capture.read_result(pad.mac, grip):
+                dlg.response(Gtk.ResponseType.OK)
+                return False
+            return True
+
+        source = GLib.timeout_add(150, poll)
+        resp = dlg.run()
+        if resp != Gtk.ResponseType.OK:
+            GLib.source_remove(source)
+        if resp != 1:
+            grip_capture.cancel()
+        dlg.destroy()
+        if resp == 1:
+            grip_capture.request(pad.mac, grip, clear=True)
+            GLib.timeout_add(600, lambda: (self.refresh(), False)[1])
+        self.refresh()
 
     def _tick(self) -> bool:
         if not self._busy and service_state() != "active":

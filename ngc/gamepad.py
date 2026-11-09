@@ -99,7 +99,9 @@ class SwitchGamepad:
         button_map=None,
         product: int = P.NSO_GAMECUBE_PID,
         mac: str = "",
+        grip_map: Optional[dict] = None,
     ):
+        self.grip_map: dict = dict(grip_map or {})
         self.button_map = button_map or DEFAULT_BUTTON_MAP
         keys = sorted(set(self.button_map.values()))
 
@@ -158,6 +160,17 @@ class SwitchGamepad:
             return True
         return False
 
+    def _apply_grips(self, buttons: int) -> int:
+        """Replace GL/GR presses with the buttons assigned to them."""
+        grips = P.SWITCH_BUTTONS["GL"] | P.SWITCH_BUTTONS["GR"]
+        if not buttons & grips:
+            return buttons
+        out = buttons & ~grips
+        for grip, target in self.grip_map.items():
+            if buttons & P.SWITCH_BUTTONS[grip]:
+                out |= P.SWITCH_BUTTONS.get(target, 0)
+        return out
+
     def update(
         self,
         buttons: int,
@@ -167,6 +180,7 @@ class SwitchGamepad:
         right_trigger: int,
     ) -> None:
         changed = False
+        buttons = self._apply_grips(buttons)
 
         # Emit every mapped key each frame; OR switch names that share a code
         # (GC R trigger click and Z both use Shoulder R / BTN_TR).
