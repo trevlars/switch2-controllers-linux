@@ -29,8 +29,21 @@ def _setup_logging(verbose: bool) -> None:
 def _bond_sync(mac: str, player: int, adapter: str) -> bool:
     """Connect over raw ATT and run the bonding handshake so the controller
     reconnects automatically afterward."""
+    import subprocess
+
     from .bridge import prepare_bluez
     from .device import SwitchController
+
+    # Some Bluetooth adapters (Realtek RTW8922AE / RTL8922AU confirmed) cannot
+    # maintain an LE connection while the adapter is also scanning. A background
+    # `ngc run` process restarts its BleakScanner ~1 s after prepare_bluez stops
+    # scanning, which kills the newly established L2CAP link. Stop the service
+    # before the bond and restart it in the finally block regardless of outcome.
+    # Fails silently on non-systemd systems or when the service is not installed.
+    subprocess.run(
+        ["systemctl", "--user", "stop", "nso-gc.service"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
     prepare_bluez(mac, remove=True)
     ctrl = SwitchController(mac, adapter)
@@ -53,6 +66,10 @@ def _bond_sync(mac: str, player: int, adapter: str) -> bool:
         return False
     finally:
         ctrl.close()
+        subprocess.run(
+            ["systemctl", "--user", "start", "nso-gc.service"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
 
 async def _pair(cfg: Config, timeout: float, player: int | None = None) -> bool:
